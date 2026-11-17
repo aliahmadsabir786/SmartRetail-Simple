@@ -1,0 +1,245 @@
+from decimal import Decimal
+from django.conf import settings
+from django.db import models
+from django.core.validators import MinValueValidator, MaxValueValidator
+from apps.core.models import BaseModel
+from apps.products.models import Product, ProductVariant
+from apps.warehouse.models import Warehouse
+from apps.customers.models import Customer
+
+
+class Coupon(BaseModel):
+    class DiscountType(models.TextChoices):
+        PERCENT = "percent", "Percentage"
+        FIXED = "fixed", "Fixed Amount"
+
+    code = models.CharField(max_length=30, unique=True)
+    discount_type = models.CharField(max_length=10, choices=DiscountType.choices, default=DiscountType.PERCENT)
+    discount_value = models.DecimalField(max_digits=10, decimal_places=2)
+    valid_from = models.DateTimeField()
+    valid_to = models.DateTimeField()
+    usage_limit = models.PositiveIntegerField(null=True, blank=True, help_text="Blank = unlimited")
+    used_count = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "coupon"
+
+    def __str__(self):
+        return self.code
+
+    def is_valid(self, at=None):
+        from django.utils import timezone
+        now = at or timezone.now()
+        if not self.is_active or not (self.valid_from <= now <= self.valid_to):
+            return False
+        if self.usage_limit is not None and self.used_count >= self.usage_limit:
+            return False
+        return True
+
+    def calculate_discount(self, subtotal: Decimal) -> Decimal:
+        if self.discount_type == self.DiscountType.PERCENT:
+            return (subtotal * self.discount_value / Decimal("100")).quantize(Decimal("0.01"))
+        return min(self.discount_value, subtotal)
+
+
+class Sale(BaseModel):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
+        RETURNED = "returned", "Returned"
+        PARTIALLY_RETURNED = "partially_returned", "Partially Returned"
+        EDITED = "edited", "Edited"
+
+    class PaymentStatus(models.TextChoices):
+        UNPAID = "unpaid", "Unpaid"
+        PARTIAL = "partial", "Partially Paid"
+        PAID = "paid", "Paid"
+
+    invoice_number = models.CharField(max_length=30, unique=True)
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name="sales")
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="sales")
+    served_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+                                   related_name="sales_served")
+    coupon = models.ForeignKey(Coupon, on_delete=models.SET_NULL, null=True, blank=True, related_name="sales")
+
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0"))
+    discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0"))
+    tax_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0"))
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0"))
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0"))
+    # Snapshot of what the customer already owed (across all their OTHER
+    # active sales, minus payments against them) at the moment this sale was
+    # created — frozen here on purpose. Recomputing it live every time the
+    # invoice is reprinted would make an old invoice's "Previous Balance"
+    # silently drift if the customer paid something off (or booked another
+    # sale) in the meantime, which isn't how a real invoice works.
+    previous_balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0"))
+
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.COMPLETED)
+    payment_status = models.CharField(max_length=10, choices=PaymentStatus.choices, default=PaymentStatus.UNPAID)
+    # How this bill was booked — Cash or Credit — recorded independently of
+    # payment_status. Cash bills are no longer auto-settled at booking time
+    # (see apps.sales.services.create_sale): a cash booking stays UNPAID,
+    # exactly like a credit one, until it's actually collected via Customer
+    # Collection. Without this field there would be no way to tell a
+    # not-yet-collected cash bill apart from a credit one once both sit at
+    # payment_status=UNPAID — this is purely a label for that distinction
+    # and plays no part in the paid/due arithmetic.
+    is_credit = models.BooleanField(default=False)
+
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        db_table = "sale"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["invoice_number"]), models.Index(fields=["status"])]
+
+    def __str__(self):
+        return self.invoice_number
+
+    @property
+    def due_amount(self):
+        return (self.total_amount - self.paid_amount).quantize(Decimal("0.01"))
+
+    @staticmethod
+    def generate_invoice_number():
+        """
+        Builds the next invoice number as {company's configured prefix}{sequential number}.
+
+        Uses a sequential counter rather than a random one: with only 3 digits
+        (000-999) a random number would start colliding with existing invoice
+        numbers fairly quickly (invoice_number is unique=True), causing an
+        IntegrityError on save. A sequential counter can never collide, and
+        it's also the more standard, auditable pattern for invoice numbering.
+        Rolls naturally past 999 to 4+ digits instead of erroring out.
+        """
+        from apps.settings.models import CompanySettings
+
+        settings_row = CompanySettings.objects.first()
+        prefix = (settings_row.invoice_prefix if settings_row else "INV-") or "INV-"
+
+        # Only LIVE invoices decide the next number, so when the latest
+        # invoice (e.g. 763) is deleted/voided, the next new one is 763
+        # again instead of jumping to 764. A voided invoice's row is only
+        # soft-deleted and still occupies the unique invoice_number, so if
+        # it holds the number we are about to reuse, that dead row is
+        # renamed out of the way first.
+        numbers = Sale.objects.filter(invoice_number__startswith=prefix).values_list("invoice_number", flat=True)
+        top = 0
+        for n in numbers:
+            suffix = n[len(prefix):]
+            if suffix.isdigit():
+                top = max(top, int(suffix))
+        next_seq = top + 1
+
+        candidate = f"{prefix}{next_seq:03d}"
+        for dead in Sale.all_objects.filter(invoice_number=candidate, is_deleted=True):
+            dead.invoice_number = f"{candidate}~void{dead.pk}"[:30]
+            dead.save(update_fields=["invoice_number"])
+        return f"{prefix}{next_seq:03d}"
+
+
+class SaleItem(BaseModel):
+    sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name="items")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="sale_items")
+    variant = models.ForeignKey(ProductVariant, on_delete=models.PROTECT, null=True, blank=True)
+
+    quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2)
+    discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0"))
+    tax_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0"))
+
+    quantity_returned = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = "sale_item"
+
+    def __str__(self):
+        return f"{self.product.sku} x{self.quantity} on {self.sale.invoice_number}"
+
+    @property
+    def line_subtotal(self):
+        return (self.unit_price * self.quantity).quantize(Decimal("0.01"))
+
+    @property
+    def line_tax(self):
+        """Tax is calculated on the line subtotal itself (unit_price × qty),
+        before any discount is taken off — matching Product.price_with_tax."""
+        return (self.line_subtotal * self.tax_percent / Decimal("100")).quantize(Decimal("0.01"))
+
+    @property
+    def line_price_with_tax(self):
+        return self.line_subtotal + self.line_tax
+
+    @property
+    def line_discount(self):
+        """Discount is taken off the tax-inclusive line price — matching
+        Product.final_price."""
+        return (self.line_price_with_tax * self.discount_percent / Decimal("100")).quantize(Decimal("0.01"))
+
+    @property
+    def line_total(self):
+        return (self.line_price_with_tax - self.line_discount).quantize(Decimal("0.01"))
+
+
+class Payment(BaseModel):
+    class Method(models.TextChoices):
+        CASH = "cash", "Cash"
+        CARD = "card", "Card"
+        BANK_TRANSFER = "bank_transfer", "Bank Transfer"
+        MOBILE_WALLET = "mobile_wallet", "Mobile Wallet"
+        OTHER = "other", "Other"
+
+    # sale is nullable so a Payment can also represent a general cash
+    # collection against a customer's overall running balance (e.g. a daily
+    # credit-collection round) rather than always being tied to one invoice
+    # — see collect_customer_payment(). When sale is set, customer is left
+    # blank; when it's a standalone collection, customer is set instead.
+    sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name="payments", null=True, blank=True)
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, related_name="direct_payments",
+                                  null=True, blank=True)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))])
+    method = models.CharField(max_length=20, choices=Method.choices, default=Method.CASH)
+    reference = models.CharField(max_length=100, blank=True)
+    received_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+
+    class Meta:
+        db_table = "sale_payment"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        if self.sale_id:
+            return f"{self.sale.invoice_number} — {self.amount} ({self.method})"
+        return f"General collection — {self.amount} ({self.method})"
+
+
+class SaleReturn(BaseModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+
+    sale = models.ForeignKey(Sale, on_delete=models.PROTECT, related_name="returns")
+    reason = models.TextField(blank=True)
+    refund_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0"))
+    status = models.CharField(max_length=15, choices=Status.choices, default=Status.APPROVED)
+    processed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+
+    class Meta:
+        db_table = "sale_return"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Return for {self.sale.invoice_number}"
+
+
+class SaleReturnItem(BaseModel):
+    sale_return = models.ForeignKey(SaleReturn, on_delete=models.CASCADE, related_name="items")
+    sale_item = models.ForeignKey(SaleItem, on_delete=models.PROTECT, related_name="return_items")
+    quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    refund_amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        db_table = "sale_return_item"

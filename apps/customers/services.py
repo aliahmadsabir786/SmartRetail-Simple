@@ -1,0 +1,210 @@
+from decimal import Decimal
+
+
+def _money(value):
+    """Totals are always returned with 2 decimals ("0.00", not "0")."""
+    return str(Decimal(value).quantize(Decimal("0.01")))
+
+
+def get_customer_ledger(customer):
+    """
+    Builds a full statement of account for a customer: every invoice that
+    makes up what they owe shows as its own dated line (Invoice No, date,
+    amount — pulled straight from the Sale, same as the invoice template),
+    followed by every return and payment against those invoices — each
+    carrying a running balance so it's clear exactly which invoices add up
+    to the total, and what's been paid off since.
+
+    amount_owed / total_paid / remaining are unchanged in meaning from
+    before (still the same aggregate totals other code — previous_balance
+    snapshotting, the New Booking screen's live balance, etc. — reads off
+    this function) — only `entries` grew to include invoice/return rows
+    alongside payments, so nothing else that calls this breaks.
+    """
+    from apps.sales.models import Sale, Payment, SaleReturn
+    from django.db.models import Q
+
+    active_sales = Sale.objects.filter(customer=customer).exclude(
+        status__in=[Sale.Status.CANCELLED, Sale.Status.RETURNED]
+    ).order_by("created_at", "id")
+    # sale.total_amount is already net of any return against it — see
+    # process_return in apps/sales/services.py, which nets the refund
+    # straight off the invoice's own total_amount at the source. So
+    # total_billed here is already the correct, current amount owed on
+    # these invoices; it must NOT be reduced by refund_amount again below
+    # (that used to double-subtract every return — once because
+    # total_amount was already smaller, and again via total_returned —
+    # which is exactly what showed a returned invoice's remaining balance
+    # as a false negative "advance").
+    total_billed = sum((s.total_amount for s in active_sales), Decimal("0"))
+    amount_owed = total_billed
+
+    # Still fetched for the informational "Return against X" line below
+    # (so a return remains visible in the statement), but no longer
+    # subtracted from amount_owed — seeing when/how much was returned is
+    # useful, it just must not move the balance a second time.
+    returns = SaleReturn.objects.filter(sale__in=active_sales).select_related("sale").order_by("created_at", "id")
+
+    # Includes both payments tied to a specific invoice AND standalone
+    # "General Collection" payments recorded straight against the customer
+    # (see collect_customer_payment) — both count down the same baseline.
+    # Sorting by id as a tiebreaker (not just created_at) keeps same-second
+    # rows from a single "Collect Payment" action in their true creation
+    # order — invoices first, any leftover General Collection last.
+    payments = (
+        Payment.objects.filter(
+            Q(sale__customer=customer, sale__in=active_sales) | Q(customer=customer, sale__isnull=True)
+        )
+        .select_related("sale")
+        .order_by("created_at", "id")
+    )
+    # Advance cleared (refunded / written off) goes the opposite way: it
+    # shrinks "paid" so the leftover advance drops back toward zero.
+    clearances = list(customer.advance_clearances.order_by("created_at", "id"))
+    cleared_total = sum((c.amount for c in clearances), Decimal("0"))
+    running_paid = sum((p.amount for p in payments), Decimal("0")) - cleared_total
+
+    # Build every invoice/return/payment as a (date, tiebreak, delta, row)
+    # transaction, sort them chronologically, then walk that single list
+    # once so the running balance is always the true balance right after
+    # that specific line — invoices push it up, returns and payments bring
+    # it down. Tiebreak keeps an invoice ahead of a same-second payment
+    # against it (e.g. a cash sale paid instantly at booking).
+    txns = []
+    for sale in active_sales:
+        txns.append((sale.created_at, sale.id, 0, sale.total_amount, {
+            "type": "invoice", "sale_id": sale.id, "reference": sale.invoice_number,
+            "description": f"Invoice — {sale.invoice_number}",
+        }))
+    for r in returns:
+        # delta 0 on purpose: the return's financial effect is already
+        # baked into the invoice line above (its total_amount is already
+        # net of this refund) — this line is shown purely so a return
+        # remains visible in the statement, without moving the balance a
+        # second time.
+        txns.append((r.created_at, r.id, 1, Decimal("0"), {
+            "type": "return", "sale_id": r.sale_id, "reference": r.sale.invoice_number,
+            "description": f"Return against {r.sale.invoice_number} (already reflected in the invoice total above)",
+            "display_amount": r.refund_amount,
+        }))
+    for p in payments:
+        if p.sale_id:
+            reference = p.sale.invoice_number
+            description = f"Payment received ({p.method}) — {p.sale.invoice_number}"
+        else:
+            reference = p.reference or "General Collection"
+            description = f"Payment received ({p.method}) — General Collection"
+        txns.append((p.created_at, p.id, 2, -p.amount, {
+            "type": "payment", "id": p.id, "reference": reference,
+            "description": description, "method": p.method,
+        }))
+
+    for c in clearances:
+        txns.append((c.created_at, c.id, 3, c.amount, {
+            "type": "advance_cleared", "id": c.id,
+            "reference": c.note or "Advance Cleared",
+            "description": f"Advance cleared ({c.method})" + (f" — {c.note}" if c.note else ""),
+            "method": c.method,
+        }))
+
+    txns.sort(key=lambda t: (t[0], t[2], t[1]))
+
+    running_balance = Decimal("0")
+    entries = []
+    for date, _row_id, _tiebreak, delta, data in txns:
+        running_balance += delta
+        # Return lines carry delta=0 (see above) but still show the real
+        # refund figure via display_amount, rather than the 0 that
+        # abs(delta) would otherwise show.
+        shown_amount = data.get("display_amount", abs(delta))
+        entry = {
+            "date": date.isoformat(),
+            "type": data["type"],
+            "reference": data["reference"],
+            "description": data["description"],
+            "amount": str(shown_amount),
+            "remaining": str(running_balance),
+        }
+        if "sale_id" in data:
+            entry["sale_id"] = data["sale_id"]
+        if "id" in data:
+            entry["id"] = data["id"]
+        if "method" in data:
+            entry["method"] = data["method"]
+        entries.append(entry)
+
+    return {
+        "amount_owed": _money(amount_owed),
+        "total_paid": _money(running_paid),
+        "remaining": _money(amount_owed - running_paid),
+        "entries": entries,
+    }
+
+
+def get_all_customer_balances():
+    """
+    Bulk version of get_customer_ledger()'s totals, for the Customer
+    Collection screen: {customer_id: {amount_owed, total_paid, remaining}}
+    for every customer, in 2 queries instead of one ledger call each.
+
+    Same maths as get_customer_ledger: amount_owed is the sum of active
+    invoices (already net of returns), total_paid is every payment against
+    those invoices PLUS standalone General Collection / advance payments.
+    `remaining` is clamped at 0 — an overpaid account never reports a
+    negative "advance" figure here; it just sits at 0 once fully paid.
+    """
+    from django.db.models import Sum, Q
+    from apps.sales.models import Sale, Payment
+
+    active = Sale.objects.exclude(status__in=[Sale.Status.CANCELLED, Sale.Status.RETURNED]).filter(customer__isnull=False)
+    owed = {r["customer"]: r["t"] for r in active.values("customer").annotate(t=Sum("total_amount"))}
+
+    invoice_paid = {
+        r["sale__customer"]: r["t"]
+        for r in Payment.objects.filter(sale__in=active).values("sale__customer").annotate(t=Sum("amount"))
+    }
+    direct_paid = {
+        r["customer"]: r["t"]
+        for r in Payment.objects.filter(sale__isnull=True, customer__isnull=False).values("customer").annotate(t=Sum("amount"))
+    }
+
+    from apps.customers.models import AdvanceClearance
+    cleared = {
+        r["customer"]: r["t"]
+        for r in AdvanceClearance.objects.values("customer").annotate(t=Sum("amount"))
+    }
+
+    out = {}
+    for cid in set(owed) | set(invoice_paid) | set(direct_paid) | set(cleared):
+        o = owed.get(cid) or Decimal("0")
+        paid = (invoice_paid.get(cid) or Decimal("0")) + (direct_paid.get(cid) or Decimal("0")) - (cleared.get(cid) or Decimal("0"))
+        out[cid] = {"amount_owed": str(o), "total_paid": str(paid), "remaining": str(max(Decimal("0"), o - paid))}
+    return out
+
+
+def clear_customer_advance(customer, amount=None, method="cash", note="", user=None, occurred_on=None):
+    """
+    Clears (all or part of) the advance / credit on a customer's ledger by
+    recording an AdvanceClearance row. Invoices and payments are untouched —
+    only the advance is brought down. Raises ValueError when there is no
+    advance, or when more than the advance is asked for.
+    """
+    from django.db import transaction
+    from apps.customers.models import AdvanceClearance
+
+    with transaction.atomic():
+        remaining = Decimal(get_customer_ledger(customer)["remaining"])
+        advance = -remaining if remaining < 0 else Decimal("0")
+        if advance <= 0:
+            raise ValueError("This customer has no advance balance to clear.")
+        amount = advance if amount is None else Decimal(amount)
+        if amount <= 0:
+            raise ValueError("Amount must be greater than 0.")
+        if amount > advance:
+            raise ValueError(f"Only Rs.{advance:.2f} advance is available — can't clear more than that.")
+        row = AdvanceClearance.objects.create(
+            customer=customer, amount=amount, method=method or "cash", note=note or "", cleared_by=user)
+        if occurred_on:
+            AdvanceClearance.objects.filter(pk=row.pk).update(created_at=occurred_on)
+            row.refresh_from_db()
+        return row

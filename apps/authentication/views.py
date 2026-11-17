@@ -1,0 +1,268 @@
+import logging
+
+from django.contrib.auth.tokens import default_token_generator
+from django.utils import timezone
+from rest_framework import generics, status, permissions, serializers
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.tokens import RefreshToken
+from drf_spectacular.utils import extend_schema
+
+from rest_framework import viewsets, filters as drf_filters
+from django_filters.rest_framework import DjangoFilterBackend
+from apps.core.permissions import IsAdminOrAbove
+from apps.core.ratelimit import LoginAccountThrottle, get_client_ip
+from rest_framework.settings import api_settings
+
+from .models import User, UserActivityLog
+from .serializers import (
+    RegisterSerializer, UserSerializer, UserManagementSerializer, CustomTokenObtainPairSerializer,
+    ChangePasswordSerializer, PasswordResetRequestSerializer,
+    PasswordResetConfirmSerializer, EmailVerificationConfirmSerializer,
+    build_uid_token_link,
+)
+from .tokens import email_verification_token
+from .tasks import send_verification_email
+from .emailing import dispatch_password_reset_email
+
+logger = logging.getLogger("apps")
+
+
+def _queue_email(task, *args):
+    """Enqueue an email task without letting a broker problem (Redis down/
+    unreachable, etc.) hang or fail the request that triggered it.
+
+    Fixed: send_verification_email.delay(...) / send_password_reset_email
+    .delay(...) were called directly inside the request/response cycle. If
+    the Celery broker can't be reached, .delay() can hang the whole request
+    (or raise, if it fails fast) — either way the person is stuck staring
+    at a spinner (or a scary 500) for something that should always feel
+    instant, since sending the email itself was never meant to be part of
+    what they're waiting on. Any broker problem is now caught and logged
+    instead, and the request finishes normally regardless — the account
+    action itself (registration / password-reset request) already
+    succeeded by this point either way.
+    """
+    try:
+        task.delay(*args)
+    except Exception:
+        logger.exception("Failed to queue email task %s — is the Celery broker reachable?", task.__name__)
+
+
+class LogoutInputSerializer(serializers.Serializer):
+    refresh = serializers.CharField()
+
+
+def _client_ip(request):
+    # Was: first X-Forwarded-For entry, which the client controls (spoofable).
+    return get_client_ip(request)
+
+
+def _log_activity(user, action, request, **metadata):
+    UserActivityLog.objects.create(
+        user=user, action=action,
+        ip_address=_client_ip(request),
+        user_agent=request.META.get("HTTP_USER_AGENT", "")[:255],
+        metadata=metadata,
+    )
+
+
+class RegisterView(generics.CreateAPIView):
+    """POST /api/v1/auth/register/ — public self-registration (customer/salesperson only)."""
+    queryset = User.objects.all()
+    serializer_class = RegisterSerializer
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "register"
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+
+        uid, token, link = build_uid_token_link(
+            user, "verify-email", token_generator=email_verification_token
+        )
+        _queue_email(send_verification_email, user.id, link)
+
+        return Response({
+            "success": True,
+            "message": "Account created. Please check your email to verify your account.",
+            "user": UserSerializer(user).data,
+        }, status=status.HTTP_201_CREATED)
+
+
+class LoginView(TokenObtainPairView):
+    """POST /api/v1/auth/login/ — JWT login with role/profile claims embedded."""
+    serializer_class = CustomTokenObtainPairSerializer
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "login"  # 5/min per IP, plus 20/hour per account (LoginAccountThrottle)
+    throttle_classes = [*api_settings.DEFAULT_THROTTLE_CLASSES, LoginAccountThrottle]
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code == 200:
+            try:
+                user = User.objects.get(email=request.data.get("email"))
+                user.last_login_ip = _client_ip(request)
+                user.last_login = timezone.now()
+                user.save(update_fields=["last_login_ip", "last_login"])
+                _log_activity(user, UserActivityLog.Action.LOGIN, request)
+            except User.DoesNotExist:
+                pass
+        return response
+
+
+class LogoutView(APIView):
+    """POST /api/v1/auth/logout/ — blacklists the given refresh token."""
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = LogoutInputSerializer
+
+    @extend_schema(request=LogoutInputSerializer)
+    def post(self, request):
+        try:
+            refresh_token = request.data["refresh"]
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+        except KeyError:
+            return Response({"success": False, "error": {"message": "refresh token is required"}},
+                             status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({"success": False, "error": {"message": "Invalid or already blacklisted token"}},
+                             status=status.HTTP_400_BAD_REQUEST)
+
+        _log_activity(request.user, UserActivityLog.Action.LOGOUT, request)
+        return Response({"success": True, "message": "Logged out successfully."}, status=status.HTTP_200_OK)
+
+
+class CustomTokenRefreshView(TokenRefreshView):
+    """POST /api/v1/auth/refresh/ — rotates refresh token (ROTATE_REFRESH_TOKENS=True)."""
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "token_refresh"
+
+
+class ChangePasswordView(generics.GenericAPIView):
+    """POST /api/v1/auth/change-password/ — authenticated password change."""
+    serializer_class = ChangePasswordSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        _log_activity(request.user, UserActivityLog.Action.PASSWORD_CHANGE, request)
+        return Response({"success": True, "message": "Password changed successfully."})
+
+
+class PasswordResetRequestView(generics.GenericAPIView):
+    """POST /api/v1/auth/password-reset/ — always returns 200 to avoid user enumeration."""
+    serializer_class = PasswordResetRequestSerializer
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "password_reset"
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+
+        # Case-insensitive, and only accounts that can actually sign in.
+        # Whether or not one matches, the response below is identical.
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if user:
+            _, _, link = build_uid_token_link(user, "reset-password", request=request)
+            dispatch_password_reset_email(user, link)
+        else:
+            logger.info("Password reset requested for an unknown/inactive email — no mail sent.")
+
+        return Response({
+            "success": True,
+            "message": "If an account with that email exists, a reset link has been sent.",
+        })
+
+
+class PasswordResetConfirmView(generics.GenericAPIView):
+    """POST /api/v1/auth/password-reset/confirm/ — sets new password from uid+token."""
+    serializer_class = PasswordResetConfirmSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        _log_activity(user, UserActivityLog.Action.PASSWORD_RESET, request)
+
+        # A reset should sign the account out everywhere: revoke every refresh
+        # token issued before the new password existed.
+        try:
+            from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+            for outstanding in OutstandingToken.objects.filter(user=user):
+                BlacklistedToken.objects.get_or_create(token=outstanding)
+        except Exception:
+            logger.exception("Could not revoke old sessions after password reset for user %s", user.pk)
+
+        return Response({
+            "success": True,
+            "message": "Password has been reset. You can now log in.",
+            "email": user.email,   # lets the login screen pre-fill the address
+        })
+
+
+class EmailVerificationConfirmView(generics.GenericAPIView):
+    """POST /api/v1/auth/verify-email/confirm/ — activates the account via uid+token link."""
+    serializer_class = EmailVerificationConfirmSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        _log_activity(user, UserActivityLog.Action.EMAIL_VERIFIED, request)
+        return Response({"success": True, "message": "Email verified successfully."})
+
+
+class ProfileView(generics.RetrieveUpdateAPIView):
+    """GET/PATCH /api/v1/auth/profile/ — current authenticated user's own profile."""
+    serializer_class = UserSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_object(self):
+        return self.request.user
+
+    def perform_update(self, serializer):
+        serializer.save()
+        _log_activity(self.request.user, UserActivityLog.Action.PROFILE_UPDATE, self.request)
+
+
+class UserManagementViewSet(viewsets.ModelViewSet):
+    """
+    Admin-only CRUD over all user accounts (/api/v1/auth/users/).
+    Distinct from ProfileView, which only ever touches request.user.
+
+    Deleting a user here is a REAL, permanent delete — every FK that could
+    reference a user (Sale.served_by/received_by/processed_by,
+    Purchase.ordered_by/paid_by/processed_by, Expense.approved_by,
+    AuditLog.user) is declared SET_NULL, so removing the user account never
+    removes or breaks those historical records — they just keep existing
+    with that "who did this" field set to null. Only a user's OWN
+    activity-log rows and notifications cascade-delete with them, which is
+    correct (there's no reason to keep either once the account is gone).
+    Toggling is_active (Activate/Deactivate) is the separate, reversible
+    action for temporarily blocking someone's login without deleting them
+    — done via a normal PATCH to this same endpoint.
+    """
+    queryset = User.objects.all().order_by("-date_joined")
+    serializer_class = UserManagementSerializer
+    permission_classes = [IsAdminOrAbove]
+    filter_backends = [DjangoFilterBackend, drf_filters.SearchFilter, drf_filters.OrderingFilter]
+    filterset_fields = ["role", "is_active"]
+    search_fields = ["email", "first_name", "last_name", "phone"]
+    ordering_fields = ["date_joined", "email"]
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.id == request.user.id:
+            return Response(
+                {"detail": "You can't delete your own account while signed in as it."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().destroy(request, *args, **kwargs)

@@ -1,0 +1,405 @@
+"""
+Base settings shared by all environments.
+Environment-specific overrides live in development.py / production.py
+"""
+import os
+from pathlib import Path
+from datetime import timedelta
+from decouple import config, Csv
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+SECRET_KEY = config("SECRET_KEY", default="insecure-dev-key-change-me")
+DEBUG = config("DEBUG", default=False, cast=bool)
+ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=Csv())
+
+# Django rejects any HTTPS POST (login forms, etc.) whose Origin/Referer
+# isn't in this list with a 403 CSRF error — needed for the same reason as
+# ALLOWED_HOSTS above: the deployed domain isn't localhost, so it must be
+# added explicitly (via the CSRF_TRUSTED_ORIGINS env var, "https://" and
+# all — this one needs the scheme, ALLOWED_HOSTS doesn't).
+CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="", cast=Csv())
+
+# Railway assigns a domain like "smart-retail-system-production-XXXX.up.railway.app"
+# and it CAN change (a redeploy, regenerating the domain, etc.) — manually
+# keeping ALLOWED_HOSTS / CSRF_TRUSTED_ORIGINS in sync with it every time is
+# exactly the DisallowedHost 400 loop this project kept hitting.
+#
+# Two layers, so this stops depending on timing/env-var luck:
+# 1. RAILWAY_PUBLIC_DOMAIN, if the platform happens to expose it to this
+#    process — a nice-to-have, but not guaranteed to be there at every boot.
+# 2. A wildcard for "*.up.railway.app" — EVERY Railway-generated domain ends
+#    in this suffix, no matter what random prefix it gets, so this alone
+#    guarantees the app accepts whatever domain Railway hands it, forever,
+#    with no manual step. Django supports a leading-dot wildcard in
+#    ALLOWED_HOSTS and a "https://*.host" wildcard in CSRF_TRUSTED_ORIGINS
+#    natively — no custom code needed for the matching itself.
+_railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+if _railway_domain:
+    ALLOWED_HOSTS.append(_railway_domain)
+    CSRF_TRUSTED_ORIGINS.append(f"https://{_railway_domain}")
+
+ALLOWED_HOSTS.append(".up.railway.app")
+CSRF_TRUSTED_ORIGINS.append("https://*.up.railway.app")
+
+# ------------------------------------------------------------------
+# Applications
+# ------------------------------------------------------------------
+DJANGO_APPS = [
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+]
+
+THIRD_PARTY_APPS = [
+    "rest_framework",
+    "rest_framework_simplejwt",
+    "rest_framework_simplejwt.token_blacklist",
+    "django_filters",
+    "corsheaders",
+    "drf_spectacular",
+    "django_extensions",
+]
+
+LOCAL_APPS = [
+    "apps.core",
+    "apps.authentication",
+    "apps.warehouse",
+    "apps.categories",
+    "apps.brands",
+    "apps.products",
+    "apps.inventory",
+    "apps.customers",
+    "apps.suppliers",
+    "apps.sales",
+    "apps.purchase",
+    "apps.expenses",
+    "apps.finance",
+    "apps.bankrecords",
+    "apps.notifications",
+    "apps.audit",
+    "apps.dashboard",
+    "apps.reports",
+    "apps.settings",
+    "apps.routes",
+    "apps.backups",
+    "apps.fbr",
+]
+
+INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
+
+# ------------------------------------------------------------------
+# Middleware
+# ------------------------------------------------------------------
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "apps.core.middleware.RequestLoggingMiddleware",
+    "apps.core.middleware.RateLimitHeadersMiddleware",
+    "apps.core.middleware.ExceptionLoggingMiddleware",
+    "apps.audit.middleware.CurrentUserMiddleware",
+]
+
+ROOT_URLCONF = "config.urls"
+
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [BASE_DIR / "templates"],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.debug",
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
+            ],
+        },
+    },
+]
+
+WSGI_APPLICATION = "config.wsgi.application"
+ASGI_APPLICATION = "config.asgi.application"
+
+# ------------------------------------------------------------------
+# Database
+# ------------------------------------------------------------------
+# DB_ENGINE switches between "postgresql" (default) and "mysql" — set
+# DB_ENGINE=mysql in .env to point this whole project at a MySQL server
+# instead. Both engines read the same DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT
+# variables, so only .env needs to change, not this file.
+DB_ENGINE = config("DB_ENGINE", default="mysql")  # "postgresql" or "mysql"
+
+if DB_ENGINE == "mysql":
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.mysql",
+            "NAME": config("DB_NAME", default="smartretail_db"),
+            "USER": config("DB_USER", default="root"),
+            "PASSWORD": config("DB_PASSWORD", default="123456"),
+            "HOST": config("DB_HOST", default="localhost"),
+            "PORT": config("DB_PORT", default="3306"),
+            "OPTIONS": {
+                "charset": "utf8mb4",
+                # Makes MySQL enforce the same strict data validation Postgres
+                # gives you for free (no silently-truncated strings, etc).
+                "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
+            },
+        }
+    }
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.mysql",
+            "NAME": config("DB_NAME", default="smartretail_db"),
+            "USER": config("DB_USER", default="root"),
+            "PASSWORD": config("DB_PASSWORD", default="123456"),
+            "HOST": config("DB_HOST", default="localhost"),
+            "PORT": config("DB_PORT", default="3306"),
+            "OPTIONS": {
+                "charset": "utf8mb4",
+                "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
+            },
+        }
+    }
+# ------------------------------------------------------------------
+# Custom user model
+# ------------------------------------------------------------------
+AUTH_USER_MODEL = "authentication.User"
+
+# ------------------------------------------------------------------
+# Password validation
+# ------------------------------------------------------------------
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 8}},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
+
+# ------------------------------------------------------------------
+# I18N
+# ------------------------------------------------------------------
+LANGUAGE_CODE = "en-us"
+TIME_ZONE = "UTC"
+USE_I18N = True
+USE_TZ = True
+
+# ------------------------------------------------------------------
+# Static / Media
+# ------------------------------------------------------------------
+STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+MEDIA_URL = "media/"
+MEDIA_ROOT = BASE_DIR / "media"
+
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# ------------------------------------------------------------------
+# REST Framework
+# ------------------------------------------------------------------
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ),
+    "DEFAULT_PERMISSION_CLASSES": (
+        "rest_framework.permissions.IsAuthenticated",
+    ),
+    "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.StandardResultsPagination",
+    "PAGE_SIZE": 20,
+    "DEFAULT_FILTER_BACKENDS": (
+        "django_filters.rest_framework.DjangoFilterBackend",
+        "rest_framework.filters.SearchFilter",
+        "rest_framework.filters.OrderingFilter",
+    ),
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    # Rate limiting - see apps/core/ratelimit.py. Order: anonymous clients,
+    # logged-in users, then per-view scopes (throttle_scope = "...").
+    "DEFAULT_THROTTLE_CLASSES": (
+        "apps.core.ratelimit.AnonThrottle",
+        "apps.core.ratelimit.UserThrottle",
+        "apps.core.ratelimit.ScopedThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": config("RATE_LIMIT_ANON", default="100/hour"),
+        "user": config("RATE_LIMIT_USER", default="3000/hour"),
+        "login": config("RATE_LIMIT_LOGIN", default="5/min"),
+        "login_account": config("RATE_LIMIT_LOGIN_ACCOUNT", default="20/hour"),
+        "register": config("RATE_LIMIT_REGISTER", default="5/hour"),
+        "token_refresh": config("RATE_LIMIT_TOKEN_REFRESH", default="30/min"),
+        "password_reset": config("RATE_LIMIT_PASSWORD_RESET", default="5/hour"),
+        "verify": config("RATE_LIMIT_VERIFY", default="60/min"),
+        "auth": "10/min",
+    },
+    # How many reverse proxies sit in front of the app (0 = none; X-Forwarded-For
+    # is then ignored). Must match the real deployment - see README/notes.
+    "NUM_PROXIES": config("RATE_LIMIT_NUM_PROXIES", default=0, cast=int),
+    "EXCEPTION_HANDLER": "apps.core.exceptions.custom_exception_handler",
+    "DEFAULT_VERSIONING_CLASS": "rest_framework.versioning.URLPathVersioning",
+    "DEFAULT_VERSION": "v1",
+    "ALLOWED_VERSIONS": ["v1"],
+}
+
+# ------------------------------------------------------------------
+# Simple JWT
+# ------------------------------------------------------------------
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=config("JWT_ACCESS_TOKEN_LIFETIME_MIN", default=60, cast=int)),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=config("JWT_REFRESH_TOKEN_LIFETIME_DAYS", default=7, cast=int)),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "UPDATE_LAST_LOGIN": True,
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": SECRET_KEY,
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    "USER_ID_FIELD": "id",
+    "USER_ID_CLAIM": "user_id",
+    "TOKEN_OBTAIN_SERIALIZER": "apps.authentication.serializers.CustomTokenObtainPairSerializer",
+}
+
+# ------------------------------------------------------------------
+# drf-spectacular (Swagger/OpenAPI)
+# ------------------------------------------------------------------
+SPECTACULAR_SETTINGS = {
+    "TITLE": "SmartRetail ERP API",
+    "DESCRIPTION": "Production-ready backend API for SmartRetail ERP & POS System",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SCHEMA_PATH_PREFIX": r"/api/v[0-9]",
+}
+
+# ------------------------------------------------------------------
+# CORS
+# ------------------------------------------------------------------
+CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:3000,http://localhost:5500,http://127.0.0.1:5500", cast=Csv())
+CORS_ALLOW_CREDENTIALS = True
+CORS_EXPOSE_HEADERS = ["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"]
+
+# ------------------------------------------------------------------
+# Cache (Redis)
+# ------------------------------------------------------------------
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+    }
+}
+
+# Separate cache used ONLY for rate-limit counters. With RATELIMIT_REDIS_URL set
+# the counters live in Redis and are shared by every server/worker (needed in
+# production - in-memory counters are per-process, so N workers = N x the limit).
+# Unset = in-memory (fine for local development).
+RATELIMIT_REDIS_URL = config("RATELIMIT_REDIS_URL", default="")
+if RATELIMIT_REDIS_URL:
+    CACHES["throttle"] = {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": RATELIMIT_REDIS_URL,
+        "KEY_PREFIX": "ratelimit",
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "SOCKET_CONNECT_TIMEOUT": 2,
+            "SOCKET_TIMEOUT": 2,
+            # If Redis is unreachable, let requests through (and log) instead of
+            # taking the whole site down with 500 errors.
+            "IGNORE_EXCEPTIONS": True,
+        },
+    }
+else:
+    CACHES["throttle"] = {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "throttle",
+    }
+# ------------------------------------------------------------------
+# Celery
+# ------------------------------------------------------------------
+CELERY_BROKER_URL = config("CELERY_BROKER_URL", default="redis://localhost:6379/1")
+# Fail fast if the broker (Redis) isn't reachable, instead of the request
+# that triggered the email (register / forgot-password) hanging for a long
+# OS-level TCP timeout before giving up.
+CELERY_BROKER_CONNECTION_TIMEOUT = config("CELERY_BROKER_CONNECTION_TIMEOUT", default=3, cast=int)
+CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default="redis://localhost:6379/2")
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = TIME_ZONE
+
+# ------------------------------------------------------------------
+# Email
+# ------------------------------------------------------------------
+EMAIL_BACKEND = config("EMAIL_BACKEND", default="django.core.mail.backends.smtp.EmailBackend")
+# Never let an unreachable/slow SMTP server hang a sender forever.
+EMAIL_TIMEOUT = config("EMAIL_TIMEOUT", default=15, cast=int)
+# False (default): password-reset emails are sent straight from the Django
+# process in a background thread, so forgot-password works without Redis or a
+# Celery worker. True: queue them through Celery (falls back to the thread if
+# the broker is unreachable).
+EMAIL_SEND_VIA_CELERY = config("EMAIL_SEND_VIA_CELERY", default=False, cast=bool)
+EMAIL_HOST = config("EMAIL_HOST", default="smtp.gmail.com")
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
+EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
+DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="SmartRetail ERP <no-reply@smartretail.com>")
+
+# How long a password-reset / email-verification link stays valid (seconds).
+# Must match the "This link expires in 1 hour" text in
+# templates/emails/password_reset.html — Django's own default here is 3 days
+# (259200s), which would have made that email text wrong.
+PASSWORD_RESET_TIMEOUT = config("PASSWORD_RESET_TIMEOUT", default=3600, cast=int)
+
+# Fixed: this defaulted to "http://localhost:3000", a separate dev-server
+# port that doesn't exist in this project's architecture — Django serves the
+# whole SPA itself from "/" (see config/urls.py), on :8000 locally. Emailed
+# links (password reset, email verification) are absolute URLs built from
+# this value, so it must point at wherever this same Django app is actually
+# reachable — the Railway/production domain in deployment, set via the
+# FRONTEND_URL env var.
+FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:8000")
+
+# Public address of this site, used ONLY inside the QR code on sale slips.
+# Leave empty to use whatever address the request came in on (fine on the
+# deployed site). Locally the request address is 127.0.0.1, which a phone
+# cannot open - set this to an address the phone can reach, e.g.
+#   PUBLIC_BASE_URL=http://192.168.1.10:8000      (your PC's LAN IP)
+#   PUBLIC_BASE_URL=https://your-app.up.railway.app
+PUBLIC_BASE_URL = config("PUBLIC_BASE_URL", default="").strip().rstrip("/")
+
+# ------------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------------
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "[{asctime}] {levelname} {name} — {message}",
+            "style": "{",
+        },
+        "simple": {"format": "{levelname} {message}", "style": "{"},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "verbose"},
+        "file": {
+            "class": "apps.core.logging_handlers.SafeRotatingFileHandler",
+            "filename": BASE_DIR / "logs" / "smartretail.log",
+            "maxBytes": 10 * 1024 * 1024,
+            "backupCount": 5,
+            "formatter": "verbose",
+        },
+    },
+    "root": {"handlers": ["console"], "level": "INFO"},
+    "loggers": {
+        "django": {"handlers": ["console", "file"], "level": "INFO", "propagate": False},
+        "apps": {"handlers": ["console", "file"], "level": "DEBUG", "propagate": False},
+    },
+}
+
+(BASE_DIR / "logs").mkdir(exist_ok=True)

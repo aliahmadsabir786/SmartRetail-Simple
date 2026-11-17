@@ -1,0 +1,343 @@
+from datetime import timedelta
+from django.utils import timezone
+from rest_framework import viewsets, filters, status, mixins
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from django.db.models import Q
+from django.db.models.functions import Right
+from django.utils.dateparse import parse_date, parse_datetime
+from django_filters import rest_framework as df_filters
+from django_filters.rest_framework import DjangoFilterBackend
+
+from apps.core.exceptions import InvalidTransitionException
+from apps.core.permissions import IsCashierOrAbove, IsManagerOrAbove
+from apps.customers.models import Customer
+from apps.warehouse.models import Warehouse
+from apps.sales.models import SaleItem
+from . import services
+from .models import Sale, Coupon, SaleReturn, Payment
+from .serializers import (
+    SaleSerializer, CreateSaleSerializer, AddPaymentSerializer,
+    ProcessReturnSerializer, SaleReturnSerializer, PaymentSerializer,
+    PaymentEditSerializer, CouponSerializer, FinalizeSaleSerializer,
+)
+
+
+class CouponViewSet(viewsets.ModelViewSet):
+    queryset = Coupon.objects.all()
+    serializer_class = CouponSerializer
+    permission_classes = [IsManagerOrAbove]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ["is_active"]
+    search_fields = ["code"]
+
+
+class PaymentViewSet(mixins.UpdateModelMixin, mixins.DestroyModelMixin, viewsets.GenericViewSet):
+    """
+    PATCH/DELETE /sales/payments/{id}/ — manually correct or remove a
+    payment that was recorded wrong (typo'd amount, wrong date, duplicate
+    entry), straight from the Ledger Accounts screen. Kept as its own
+    endpoint rather than nested under Sale because editing a payment
+    ripples into the parent Sale's paid_amount/payment_status and the
+    customer's outstanding_balance — see apps.sales.services.update_payment.
+    """
+    queryset = Payment.objects.select_related("sale", "sale__customer")
+    serializer_class = PaymentEditSerializer
+    permission_classes = [IsManagerOrAbove]
+
+    def partial_update(self, request, pk=None):
+        payment = self.get_object()
+        serializer = self.get_serializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        v = serializer.validated_data
+        payment = services.update_payment(
+            payment,
+            amount=v.get("amount"),
+            method=v.get("method"),
+            reference=v.get("reference"),
+            occurred_on=v.get("occurred_on"),
+            user=request.user,
+        )
+        return Response(PaymentSerializer(payment).data)
+
+    def destroy(self, request, pk=None):
+        payment = self.get_object()
+        services.delete_payment(payment)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class SaleFilter(df_filters.FilterSet):
+    """Filters for GET /sales/.
+
+    Date range for the Sale Slips screen
+    ------------------------------------
+    An Order Booking stores the date picked in the "Booking Date" field inside
+    `notes` as  "... (date: YYYY-MM-DD)". That date can differ from created_at
+    (back-dated bookings, or UTC vs Pakistan time around midnight), so the
+    slip's *effective* date is:
+
+        • the booking date from notes, when the notes carry one, else
+        • created_at (frontend sends the user's LOCAL day boundaries as ISO
+          datetimes in created_after / created_before).
+
+    date_from / date_to (YYYY-MM-DD) + created_after / created_before select
+    slips whose effective date falls inside the range.
+    """
+    class Meta:
+        model = Sale
+        fields = ["status", "payment_status", "warehouse", "customer"]
+
+    BOOK_DATE_RE = r"\(date: [0-9]{4}-[0-9]{2}-[0-9]{2}\)$"
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        q = self.data
+        d_from = parse_date(q.get("date_from") or "")
+        d_to = parse_date(q.get("date_to") or "")
+        c_from = parse_datetime(q.get("created_after") or "")
+        c_to = parse_datetime(q.get("created_before") or "")
+        if not (d_from or d_to or c_from or c_to):
+            return queryset
+
+        has_book_date = Q(notes__regex=self.BOOK_DATE_RE)
+        queryset = queryset.annotate(_book_tail=Right("notes", 11))
+
+        book = has_book_date
+        if d_from:
+            book &= Q(_book_tail__gte=f"{d_from.isoformat()})")
+        if d_to:
+            book &= Q(_book_tail__lte=f"{d_to.isoformat()})")
+
+        created = ~has_book_date
+        if c_from:
+            created &= Q(created_at__gte=c_from)
+        if c_to:
+            created &= Q(created_at__lte=c_to)
+
+        return queryset.filter(book | created)
+
+
+class SaleViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
+                   mixins.CreateModelMixin, mixins.DestroyModelMixin, viewsets.GenericViewSet):
+    """
+    POS / Sales endpoint. Creating a sale runs the full atomic service pipeline
+    (stock deduction, pricing, credit check, loyalty points) — see apps.sales.services.
+
+    A booking can also be "held" instead of finalized straight away — see the
+    hold/finalize actions below — which parks it as a DRAFT invoice with none
+    of those side effects until it's finalized (or deleted, since a held
+    invoice never touched stock or a customer's balance in the first place).
+    """
+    queryset = Sale.objects.select_related("customer", "warehouse", "served_by").prefetch_related(
+        "items", "payments"
+    )
+    permission_classes = [IsCashierOrAbove]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_class = SaleFilter
+    search_fields = ["invoice_number", "customer__name"]
+    ordering_fields = ["created_at", "total_amount"]
+
+    def get_serializer_class(self):
+        if self.action in ("create", "hold", "edit_hold", "edit"):
+            return CreateSaleSerializer
+        if self.action == "finalize":
+            return FinalizeSaleSerializer
+        return SaleSerializer
+
+    @staticmethod
+    def _resolve_customer_warehouse(v):
+        customer = Customer.objects.get(pk=v["customer"]) if v.get("customer") else None
+        warehouse = Warehouse.objects.get(pk=v["warehouse"])
+        return customer, warehouse
+
+    @staticmethod
+    def _recent_duplicate(user, customer, items, window_seconds=10):
+        """Same user, same customer, identical items, within a few seconds =
+        a double-click / network retry, not a second order. Returns the sale
+        that was just created instead of letting a duplicate invoice be made
+        (which would also bill the customer twice and push the first bill into
+        the second one's "Previous Balance")."""
+        if not customer:
+            return None
+        since = timezone.now() - timedelta(seconds=window_seconds)
+        want = sorted(
+            services.sale_item_key(i["product"].pk, i["variant"].pk if i.get("variant") else None,
+                                   i["quantity"], i["unit_price"],
+                                   i.get("discount_percent", 0), i.get("tax_percent", 0))
+            for i in items
+        )
+        recent = Sale.objects.filter(
+            customer=customer, served_by=user, created_at__gte=since,
+            status__in=[Sale.Status.COMPLETED, Sale.Status.EDITED],
+        ).prefetch_related("items")
+        for sale in recent:
+            have = sorted(
+                services.sale_item_key(i.product_id, i.variant_id, i.quantity, i.unit_price,
+                                       i.discount_percent, i.tax_percent)
+                for i in sale.items.all()
+            )
+            if have == want:
+                return sale
+        return None
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        v = serializer.validated_data
+        customer, warehouse = self._resolve_customer_warehouse(v)
+
+        duplicate = self._recent_duplicate(request.user, customer, v["items"])
+        if duplicate:
+            return Response(SaleSerializer(duplicate).data, status=status.HTTP_200_OK)
+
+        coupon = None
+        if v.get("coupon_code"):
+            coupon = Coupon.objects.filter(code=v["coupon_code"]).first()
+
+        sale = services.create_sale(
+            customer=customer, warehouse=warehouse, items=v["items"], user=request.user,
+            discount_amount=v.get("discount_amount", 0), coupon=coupon,
+            is_credit_sale=v.get("is_credit_sale", False), notes=v.get("notes", ""),
+        )
+        return Response(SaleSerializer(sale).data, status=status.HTTP_201_CREATED)
+
+    def destroy(self, request, *args, **kwargs):
+        """A sale can only be deleted while it's still a held (DRAFT) invoice —
+        once finalized it has already moved stock/money and must go through a
+        proper Sale Return / Cancel instead."""
+        sale = self.get_object()
+        if sale.status != Sale.Status.DRAFT:
+            raise InvalidTransitionException("Only a held invoice can be deleted — this one is already finalized.")
+        return super().destroy(request, *args, **kwargs)
+
+    def perform_destroy(self, instance):
+        # A held invoice never touched stock or a customer's balance, so
+        # there's nothing to reverse — delete it completely rather than the
+        # default soft-delete, so it's actually gone, not just hidden.
+        instance.delete(hard=True)
+
+    @action(detail=False, methods=["post"], url_path="hold")
+    def hold(self, request):
+        """POST /sales/hold/ — "Hold Invoice": parks the current booking as a
+        DRAFT invoice with no stock/balance side effects yet."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        v = serializer.validated_data
+        customer, warehouse = self._resolve_customer_warehouse(v)
+
+        sale = services.create_draft_sale(
+            customer=customer, warehouse=warehouse, items=v["items"], user=request.user,
+            discount_amount=v.get("discount_amount", 0), notes=v.get("notes", ""),
+        )
+        return Response(SaleSerializer(sale).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["patch"], url_path="hold")
+    def edit_hold(self, request, pk=None):
+        """PATCH /sales/{id}/hold/ — "Edit Invoice": replaces the items on a
+        still-held invoice. Refused once the invoice has been finalized."""
+        sale = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        v = serializer.validated_data
+        customer, warehouse = self._resolve_customer_warehouse(v)
+
+        sale = services.update_draft_sale(
+            sale, customer=customer, warehouse=warehouse, items=v["items"],
+            discount_amount=v.get("discount_amount", 0), notes=v.get("notes", ""),
+        )
+        return Response(SaleSerializer(sale).data)
+
+    @action(detail=True, methods=["post"], url_path="finalize")
+    def finalize(self, request, pk=None):
+        """POST /sales/{id}/finalize/ — turns a held invoice into a real,
+        completed sale: deducts stock and applies credit/loyalty side effects."""
+        sale = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        v = serializer.validated_data
+
+        coupon = None
+        if v.get("coupon_code"):
+            coupon = Coupon.objects.filter(code=v["coupon_code"]).first()
+
+        sale = services.finalize_draft_sale(
+            sale, user=request.user, coupon=coupon, is_credit_sale=v.get("is_credit_sale", False),
+        )
+        return Response(SaleSerializer(sale).data)
+
+    @action(detail=True, methods=["post"], url_path="pay")
+    def pay(self, request, pk=None):
+        """POST /sales/{id}/pay/ — record a payment (cash/card/etc.) against this invoice."""
+        sale = self.get_object()
+        serializer = AddPaymentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payment = services.add_payment(
+            sale, serializer.validated_data["amount"], serializer.validated_data["method"],
+            user=request.user, reference=serializer.validated_data.get("reference", ""),
+        )
+        return Response(PaymentSerializer(payment).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["patch"], url_path="edit")
+    def edit(self, request, pk=None):
+        """PATCH /sales/{id}/edit/ — edits an already-finalized invoice IN
+        PLACE: same invoice_number, same row. Reverses the old items' stock/
+        credit/loyalty effects and reapplies fresh ones for the new items,
+        then marks the invoice EDITED (not RETURNED). Refused for a
+        cancelled or still-held (draft) invoice — see edit_completed_sale."""
+        sale = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        v = serializer.validated_data
+        customer, warehouse = self._resolve_customer_warehouse(v)
+
+        coupon = None
+        if v.get("coupon_code"):
+            coupon = Coupon.objects.filter(code=v["coupon_code"]).first()
+
+        sale = services.edit_completed_sale(
+            sale, customer=customer, warehouse=warehouse, items=v["items"], user=request.user,
+            discount_amount=v.get("discount_amount", 0), coupon=coupon,
+            is_credit_sale=v.get("is_credit_sale"), notes=v.get("notes", ""),
+        )
+        data = dict(SaleSerializer(sale).data)
+        # True when the "edit" changed nothing and the invoice was left as is.
+        data["edit_unchanged"] = bool(getattr(sale, "_edit_unchanged", False))
+        return Response(data)
+
+    @action(detail=True, methods=["post"], url_path="return")
+    def process_return(self, request, pk=None):
+        """POST /sales/{id}/return/ — process a full or partial return with automatic restocking."""
+        sale = self.get_object()
+        serializer = ProcessReturnSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        return_items = []
+        for entry in serializer.validated_data["items"]:
+            sale_item = SaleItem.objects.get(pk=entry["sale_item"], sale=sale)
+            return_items.append({"sale_item": sale_item, "quantity": entry["quantity"]})
+
+        sale_return = services.process_return(
+            sale, return_items, serializer.validated_data.get("reason", ""), user=request.user,
+        )
+        return Response(SaleReturnSerializer(sale_return).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="void")
+    def void(self, request, pk=None):
+        """POST /sales/{id}/void/ — completely removes a wrongly-created/
+        duplicate finalized invoice: restocks everything on it, clears its
+        due off the customer's balance, and deletes it outright (not a
+        Return — it won't show up anywhere afterwards, even under a
+        'returned'/'cancelled' status filter)."""
+        sale = self.get_object()
+        services.void_sale(sale, user=request.user)
+        return Response({"detail": "Invoice deleted — stock and balance restored."})
+
+
+class SaleReturnViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    """Read-only history of processed sale returns (/api/v1/sales/returns/)."""
+    queryset = SaleReturn.objects.select_related("sale", "processed_by").prefetch_related("items")
+    serializer_class = SaleReturnSerializer
+    permission_classes = [IsCashierOrAbove]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ["sale", "status"]
+    ordering_fields = ["created_at"]

@@ -1,0 +1,12596 @@
+// ── SPLASH SCREEN ──────────────────────────────────────
+// The splash covers the page until the app is really ready: if a saved
+// session exists, the portal is opened UNDER the splash first (profile
+// fetched, dashboard rendered) and only then does the splash fade out — so
+// you never see the portal "opening" behind the loader. window.__bootReady
+// is resolved by the session-restore code below.
+(function() {
+  const MIN_MS  = 900;   // shortest the splash ever shows (lets the logo animate)
+  const MAX_MS  = 4000;  // safety: never hold the splash longer than this
+  const SETTLE  = 350;   // portal gets a moment to paint before the splash lifts
+  let resolveBoot;
+  window.__bootReady = new Promise(r => { resolveBoot = r; });
+  window.__bootDone  = () => resolveBoot();
+
+  document.addEventListener('DOMContentLoaded', function() {
+    // Apply saved theme immediately (before splash fade)
+    if (localStorage.getItem('smartretail_theme') === 'light') {
+      document.body.classList.add('light-mode');
+    }
+    const splash = document.getElementById('splash-screen');
+    const login  = document.getElementById('login-screen');
+    if (!splash || !login) return;
+
+    // Keep login hidden behind splash
+    login.style.opacity = '0';
+    login.style.pointerEvents = 'none';
+
+    function hideSplash() {
+      if (splash.dataset.hidden) return;
+      splash.dataset.hidden = '1';
+      login.style.transition = 'opacity .3s ease';
+      login.style.opacity  = '1';
+      login.style.pointerEvents = '';
+      splash.classList.add('hiding');
+      setTimeout(function() { splash.style.display = 'none'; }, 400);
+    }
+
+    const minWait = new Promise(r => setTimeout(r, MIN_MS));
+    Promise.all([minWait, window.__bootReady])
+      .then(() => new Promise(r => setTimeout(r, SETTLE)))
+      .then(hideSplash);
+    setTimeout(hideSplash, MAX_MS);
+  });
+})();
+
+// ═══════════════════════════════════════════════════════
+// DATA STORE
+// ═══════════════════════════════════════════════════════
+// Generic debounce: delays running fn until `delay`ms after the last call
+// with the same key. Used on search inputs so typing doesn't fire a fresh
+// network request on every keystroke (which is what made filters feel slow).
+const _debounceTimers = {};
+function debounced(key, fn, delay = 280) {
+  clearTimeout(_debounceTimers[key]);
+  _debounceTimers[key] = setTimeout(fn, delay);
+}
+
+const DB = {
+  users: [
+    { id: 1, name: 'Admin User', username: 'admin', password: 'admin123', role: 'Admin', email: 'admin@smartretail.com', lastLogin: '2025-01-17 09:00', status: 'Active', permissions: ['dashboard','pos','booking','saleslips','orders','products','inventory','purchases','customers','suppliers','expenses','accounting','reports','users','settings'] },
+    { id: 2, name: 'Sub Admin 1', username: 'subadmin1', password: 'sub123', role: 'Sub-Admin', email: 'subadmin1@smartretail.com', lastLogin: '2025-01-17 08:30', status: 'Active', permissions: ['dashboard','pos','booking','saleslips','orders','customers','products'] },
+  ],
+  categories: ['Beverages','Snacks','Dairy','Bakery','Meat & Poultry','Personal Care','Household','Electronics','Stationery','Frozen Foods'],
+  products: [
+    { id: 1, name: 'Coca-Cola 330ml', sku: 'BEV-001', category: 'Beverages', brand: 'Coca-Cola', buyPrice: 0.50, sellPrice: 1.25, stock: 5, minStock: 20, barcode: '5449000000996', expiry: '2025-06-01', supplier: 1, icon: '🥤', cartonQty: 10, piecesPerCarton: 24 },
+    { id: 2, name: 'Lays Classic Chips', sku: 'SNK-001', category: 'Snacks', brand: 'Frito-Lay', buyPrice: 0.80, sellPrice: 2.00, stock: 45, minStock: 15, barcode: '0028400047418', expiry: '', supplier: 2, icon: '🍟', cartonQty: 5, piecesPerCarton: 20 },
+    { id: 3, name: 'Whole Milk 1L', sku: 'DAI-001', category: 'Dairy', brand: 'Fresh Farms', buyPrice: 0.90, sellPrice: 1.80, stock: 8, minStock: 25, barcode: '0070038622516', expiry: '2025-01-20', supplier: 3, icon: '🥛', cartonQty: 4, piecesPerCarton: 12 },
+    { id: 4, name: 'White Bread Loaf', sku: 'BAK-001', category: 'Bakery', brand: 'Wonder Bread', buyPrice: 1.20, sellPrice: 2.50, stock: 22, minStock: 10, barcode: '0070038100000', expiry: '2025-01-22', supplier: 4, icon: '🍞', cartonQty: 3, piecesPerCarton: 10 },
+    { id: 5, name: 'Dove Soap 100g', sku: 'PC-001', category: 'Personal Care', brand: 'Dove', buyPrice: 0.70, sellPrice: 1.50, stock: 60, minStock: 20, barcode: '0037000232279', expiry: '', supplier: 2, icon: '🧼', cartonQty: 8, piecesPerCarton: 36 },
+    { id: 6, name: 'Orange Juice 1L', sku: 'BEV-002', category: 'Beverages', brand: 'Tropicana', buyPrice: 1.50, sellPrice: 3.20, stock: 3, minStock: 15, barcode: '0048500000000', expiry: '2025-02-15', supplier: 1, icon: '🍊', cartonQty: 2, piecesPerCarton: 12 },
+    { id: 7, name: 'Eggs (12-pack)', sku: 'DAI-002', category: 'Dairy', brand: 'Happy Hens', buyPrice: 2.00, sellPrice: 4.50, stock: 30, minStock: 20, barcode: '0000000000001', expiry: '2025-01-28', supplier: 3, icon: '🥚', cartonQty: 6, piecesPerCarton: 12 },
+    { id: 8, name: 'Chicken Breast 1kg', sku: 'MEAT-001', category: 'Meat & Poultry', brand: 'FreshMeat Co.', buyPrice: 4.50, sellPrice: 8.99, stock: 0, minStock: 10, barcode: '0000000000002', expiry: '2025-01-19', supplier: 3, icon: '🍗', cartonQty: 2, piecesPerCarton: 6 },
+    { id: 9, name: 'Shampoo 400ml', sku: 'PC-002', category: 'Personal Care', brand: 'Head & Shoulders', buyPrice: 2.50, sellPrice: 5.99, stock: 35, minStock: 10, barcode: '0037000555555', expiry: '', supplier: 2, icon: '🧴', cartonQty: 4, piecesPerCarton: 12 },
+    { id: 10, name: 'Notebook A4', sku: 'STA-001', category: 'Stationery', brand: 'Papermate', buyPrice: 0.60, sellPrice: 1.50, stock: 120, minStock: 30, barcode: '0000000000003', expiry: '', supplier: 5, icon: '📓', cartonQty: 10, piecesPerCarton: 50 },
+  ],
+  customers: [
+    { id: 1, accountNo: 'ACC-0001', name: 'Ahmed Hassan', phone: '+92 300 1234567', email: 'ahmed@email.com', address: 'House 12, Model Town, Lahore', totalPurchases: 1245.50, loyaltyPoints: 124, lastVisit: '2025-01-17', prevBalance: 500.00 },
+    { id: 2, accountNo: 'ACC-0002', name: 'Sarah Williams', phone: '+1 555-234-5678', email: 'sarah@email.com', address: '45 Oak Street, New York', totalPurchases: 892.00, loyaltyPoints: 89, lastVisit: '2025-01-16', prevBalance: 0 },
+    { id: 3, accountNo: 'ACC-0003', name: 'Muhammad Ali', phone: '+92 333 9876543', email: 'mali@email.com', address: 'Gulberg III, Lahore', totalPurchases: 2100.75, loyaltyPoints: 210, lastVisit: '2025-01-15', prevBalance: 1200.00 },
+    { id: 4, accountNo: 'ACC-0004', name: 'Emma Johnson', phone: '+1 555-876-1234', email: 'emma@email.com', address: '78 Maple Ave, Chicago', totalPurchases: 450.00, loyaltyPoints: 45, lastVisit: '2025-01-14', prevBalance: 0 },
+    { id: 5, accountNo: 'ACC-0005', name: 'Fatima Sheikh', phone: '+92 321 5556677', email: 'fatima@email.com', address: 'DHA Phase 5, Karachi', totalPurchases: 3450.25, loyaltyPoints: 345, lastVisit: '2025-01-17', prevBalance: 750.00 },
+  ],
+  suppliers: [
+    { id: 1, name: 'Beverage Distributors Ltd', phone: '+1 800-555-0101', email: 'orders@bevdist.com', address: '100 Industrial Park, Chicago', balance: -500.00, status: 'Active' },
+    { id: 2, name: 'FMCG Wholesale Co.', phone: '+1 800-555-0202', email: 'supply@fmcg.com', address: '200 Commerce Blvd, Houston', balance: 0, status: 'Active' },
+    { id: 3, name: 'Fresh Food Supplies', phone: '+1 800-555-0303', email: 'fresh@foodsup.com', address: '300 Market St, LA', balance: -1200.00, status: 'Active' },
+    { id: 4, name: 'Bakery Partners Inc.', phone: '+1 800-555-0404', email: 'orders@bakeryp.com', address: '400 Baker Lane, NY', balance: 0, status: 'Active' },
+    { id: 5, name: 'Office Supplies World', phone: '+1 800-555-0505', email: 'stock@offworld.com', address: '500 Office Park, Miami', balance: 0, status: 'Active' },
+  ],
+  expenses: [
+    { id: 1, category: 'Rent', description: 'Monthly store rent', amount: 2500, date: '2025-01-01', ref: 'EXP-001' },
+    { id: 2, category: 'Electricity', description: 'Monthly electricity bill', amount: 350, date: '2025-01-05', ref: 'EXP-002' },
+    { id: 3, category: 'Salary', description: 'Staff salaries January', amount: 8500, date: '2025-01-31', ref: 'EXP-003' },
+    { id: 4, category: 'Transport', description: 'Delivery vehicle fuel', amount: 180, date: '2025-01-10', ref: 'EXP-004' },
+    { id: 5, category: 'Marketing', description: 'Social media ads', amount: 200, date: '2025-01-12', ref: 'EXP-005' },
+  ],
+  orders: [],
+  orderBookings: [],
+  routes: [
+    { id:1, name:'North Zone A', area:'Model Town, Johar Town', person:'Saleem Khan', days:['Monday','Wednesday','Friday'], suppliers:[1,2], status:'Active', notes:'Morning slot preferred' },
+    { id:2, name:'South Zone B', area:'DHA, Cantt', person:'Tariq Mehmood', days:['Tuesday','Thursday'], suppliers:[3,4], status:'Active', notes:'' },
+    { id:3, name:'East Zone C', area:'Gulberg, Garden Town', person:'Asif Raza', days:['Monday','Saturday'], suppliers:[2,5], status:'Active', notes:'' },
+  ],
+  purchases: [
+    { id: 1, date: '2025-01-10', supplier: 1, items: [{productId:1,name:'Coca-Cola 330ml',qty:100,price:0.50}], total: 50.00, payment: 'Paid', notes: '' },
+    { id: 2, date: '2025-01-12', supplier: 3, items: [{productId:3,name:'Whole Milk 1L',qty:50,price:0.90},{productId:7,name:'Eggs (12-pack)',qty:20,price:2.00}], total: 85.00, payment: 'Pending', notes: '' },
+  ],
+  stockHistory: [],
+  activityLog: [
+    { time: '09:15:32', user: 'admin', action: 'Login', details: 'Admin logged in', ip: '192.168.1.100' },
+    { time: '09:20:14', user: 'cashier', action: 'Sale', details: 'Invoice INV-0001 - Rs.45.50', ip: '192.168.1.102' },
+    { time: '09:35:00', user: 'manager', action: 'Product Update', details: 'Updated Coca-Cola stock', ip: '192.168.1.101' },
+  ],
+  customerLedger: {
+    1: [ { date:'2025-01-10', desc:'Opening Balance', debit:500, credit:0, ref:'OB-001' }, { date:'2025-01-15', desc:'Invoice BK-00001 - Coca-Cola', debit:0, credit:57, ref:'BK-00001' } ],
+    3: [ { date:'2025-01-01', desc:'Opening Balance', debit:1200, credit:0, ref:'OB-003' }, { date:'2025-01-17', desc:'Invoice BK-00002 - Soap/Shampoo', debit:0, credit:80.88, ref:'BK-00002' } ],
+    5: [ { date:'2025-01-05', desc:'Opening Balance', debit:750, credit:0, ref:'OB-005' } ],
+  },
+  supplierLedger: {
+    1: [ { date:'2025-01-10', desc:'Purchase PO-0001 - Coca-Cola', debit:50, credit:0, ref:'PO-0001' }, { date:'2025-01-12', desc:'Payment made', debit:0, credit:50, ref:'PAY-001' } ],
+    3: [ { date:'2025-01-12', desc:'Purchase PO-0002 - Milk/Eggs', debit:85, credit:0, ref:'PO-0002' } ],
+  },
+  sysSettings: {
+    storeName: 'SmartRetail Store',
+    address: '123 Market Street, City',
+    phone: '+1 555-000-1234',
+    email: 'store@smartretail.com',
+    taxRate: 8,
+    currency: 'USD (Rs.)',
+    distributorName: '',
+    distributorContact: '',
+    receiptHeader: 'Thank you for shopping at SmartRetail!',
+    receiptFooter: 'All sales are final. Visit us again!',
+    logoDataUrl: '',
+    showTaxOnReceipt: true,
+    lowStockThreshold: 10,
+  },
+};
+
+// Global safety net: any unhandled promise rejection (failed API call that
+// wasn't individually wrapped in try/catch) now surfaces as a toast instead
+// of failing silently with an empty-looking page.
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('Unhandled error:', event.reason);
+  if (typeof toast === 'function') {
+    const msg = (event.reason && event.reason.message) || 'Something went wrong — check the browser console (F12) for details.';
+    toast(msg, 'error');
+  }
+});
+
+let currentUser = null;
+let cart = [];
+let selectedPayment = 'cash';
+let invoiceCounter = 100;
+let bookingCounter = 1;
+let charts = {};
+// Shared categorical palette for all charts — from the app's coolors.co
+// palette (092327-0b5351-00a9a5), so every chart in the app feels like one
+// consistent, deliberate design rather than a grab-bag of default colors.
+const CHART_PALETTE = ['#ea6c4d', '#f4a26a', '#7fb3d5', '#d9a441', '#4caf7d', '#c65a44', '#8f8f8f', '#f0805f'];
+// A separate, more varied palette for the category pie chart — CHART_PALETTE
+// stays coral-toned throughout (matches the rest of the dashboard's bars/
+// bubbles), but a pie chart needs each slice to read as visually distinct
+// at a glance, so this spreads across a few different hues instead, coral
+// still leading since it's the theme's primary accent.
+const PIE_PALETTE = ['#ea6c4d', '#f4a26a', '#7fb3d5', '#d9a441', '#4caf7d', '#c65a44', '#8f8f8f', '#f2994a', '#f0805f', '#8e6bb5'];
+
+// Shared CanvasJS color set for the current theme — previously the pie and
+// bubble charts always used dark-theme colors (theme:'dark2', near-white
+// font colors), which read fine on the dark-mode card but became almost
+// invisible once the app was switched to light mode, since the chart's own
+// card background flips to white while its text stayed the same pale color
+// meant to sit on a dark background. Both charts now pull their colors from
+// here based on the theme actually active on the page.
+function _ckTheme() {
+  const light = document.body.classList.contains('light-mode');
+  return light ? {
+    theme: 'light2',
+    text: '#1c2b2a', grid: '#e3e9e8',
+    indexLabel: '#1c2b2a', indexLabelLine: '#7c8f8d',
+    tooltipBg: '#ffffff', tooltipTitle: '#1c2b2a', tooltipBody: '#4b5c5a',
+  } : {
+    theme: 'dark2',
+    text: '#9fc9c6', grid: '#14434a',
+    indexLabel: '#eafbfa', indexLabelLine: '#5f8f8c',
+    tooltipBg: '#0d2b30', tooltipTitle: '#eafbfa', tooltipBody: '#9fc9c6',
+  };
+}
+
+// Restore session on page refresh if a valid JWT is already stored.
+document.addEventListener('DOMContentLoaded', async () => {
+  // A password-reset link looks like /?view=reset-password&uid=..&token=..
+  // (this SPA has no server-side routing for sub-paths — everything lives
+  // under `/` — so the reset link points back at root with these as query
+  // params instead of a real path). Handle that before anything else, even
+  // if the browser also happens to have a valid session stored, since
+  // clicking a reset link should always take you to the reset screen.
+  if (_checkPasswordResetLink()) {
+    loadLoginBranding();
+    initLoginCursor();
+    if (window.__bootDone) window.__bootDone();
+    return;
+  }
+
+  try {
+    if (typeof AuthAPI !== 'undefined' && AuthAPI.isLoggedIn()) {
+      try {
+        const user = await AuthAPI.profile();
+        await loginAs(user);
+      } catch (_) {
+        TokenStore.clear();
+      }
+    }
+    // Branding (logo/name) is loaded before the splash lifts so the login
+    // screen never flashes the default mark and then swaps it.
+    await Promise.race([loadLoginBranding(), new Promise(r => setTimeout(r, 1500))]);
+  } finally {
+    initLoginCursor();
+    if (window.__bootDone) window.__bootDone();
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+// FORGOT PASSWORD / RESET PASSWORD
+// ═══════════════════════════════════════════════════════
+let _resetUid = null;
+let _resetToken = null;
+let _resetEmail = null;   // returned by the confirm call; used to pre-fill the login form
+
+function _checkPasswordResetLink() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('view') !== 'reset-password') return false;
+  _resetUid = params.get('uid');
+  _resetToken = params.get('token');
+  // Clean the sensitive uid/token out of the visible URL/history right
+  // away — the reset screen keeps working off the values already captured
+  // above, but a refresh, a bookmark, or the browser's history/autofill no
+  // longer carries the token around once this has run.
+  window.history.replaceState({}, document.title, window.location.pathname);
+  if (!_resetUid || !_resetToken) {
+    showResetView(); // no valid uid/token at all — treat as an invalid link
+    _showResetInvalid();
+  } else {
+    showResetView();
+  }
+  return true;
+}
+
+function showLoginView(prefillEmail) {
+  document.getElementById('login-view').style.display = '';
+  document.getElementById('forgot-view').style.display = 'none';
+  document.getElementById('reset-view').style.display = 'none';
+  // Clear out any state from a previous attempt so re-opening a view starts fresh.
+  const fpEmail = document.getElementById('fp-email');
+  const fpMsg = document.getElementById('fp-message');
+  if (fpEmail) fpEmail.value = '';
+  if (fpMsg) fpMsg.style.display = 'none';
+  _stopResendCooldown();
+  const err = document.getElementById('login-error');
+  if (err) err.style.display = 'none';
+  if (typeof prefillEmail === 'string' && prefillEmail) {
+    const u = document.getElementById('l-user');
+    const p = document.getElementById('l-pass');
+    if (u) u.value = prefillEmail;
+    if (p) { p.value = ''; setTimeout(() => p.focus(), 60); }
+  }
+}
+// "Sign in with new password" after a successful reset: back to the login form
+// with the account's email already filled in and the cursor in the password box.
+function showLoginAfterReset() {
+  const email = _resetEmail;
+  _resetEmail = null;
+  showLoginView(email || '');
+}
+function showForgotPasswordView() {
+  document.getElementById('login-view').style.display = 'none';
+  document.getElementById('forgot-view').style.display = '';
+  document.getElementById('reset-view').style.display = 'none';
+  const err = document.getElementById('login-error');
+  if (err) err.style.display = 'none';
+  setTimeout(() => document.getElementById('fp-email')?.focus(), 60);
+}
+
+function showResetView() {
+  document.getElementById('login-view').style.display = 'none';
+  document.getElementById('forgot-view').style.display = 'none';
+  document.getElementById('reset-view').style.display = '';
+  document.getElementById('reset-form-wrap').style.display = '';
+  document.getElementById('reset-invalid-wrap').style.display = 'none';
+  document.getElementById('reset-success-wrap').style.display = 'none';
+}
+
+function _showResetInvalid() {
+  document.getElementById('reset-form-wrap').style.display = 'none';
+  document.getElementById('reset-invalid-wrap').style.display = '';
+  document.getElementById('reset-success-wrap').style.display = 'none';
+}
+
+function _showResetSuccess() {
+  document.getElementById('reset-form-wrap').style.display = 'none';
+  document.getElementById('reset-invalid-wrap').style.display = 'none';
+  document.getElementById('reset-success-wrap').style.display = '';
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+let _resendTimer = null;
+function _stopResendCooldown() {
+  if (_resendTimer) { clearInterval(_resendTimer); _resendTimer = null; }
+  const btn = document.getElementById('fp-btn');
+  if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa fa-paper-plane"></i> Send Reset Link'; }
+}
+function _startResendCooldown(seconds) {
+  const btn = document.getElementById('fp-btn');
+  if (!btn) return;
+  let left = seconds;
+  btn.disabled = true;
+  const paint = () => { btn.innerHTML = `<i class="fa fa-clock"></i> Resend link in ${left}s`; };
+  paint();
+  if (_resendTimer) clearInterval(_resendTimer);
+  _resendTimer = setInterval(() => {
+    left -= 1;
+    if (left <= 0) {
+      _stopResendCooldown();
+      btn.innerHTML = '<i class="fa fa-redo"></i> Resend Reset Link';
+    } else paint();
+  }, 1000);
+}
+function _fpShow(msgEl, text, kind) {
+  msgEl.textContent = text;
+  msgEl.classList.toggle('is-ok', kind === 'ok');
+  msgEl.classList.toggle('is-err', kind === 'err');
+  msgEl.style.color = '';
+  msgEl.style.display = '';
+}
+
+async function submitForgotPassword() {
+  const emailEl = document.getElementById('fp-email');
+  const msgEl = document.getElementById('fp-message');
+  const btn = document.getElementById('fp-btn');
+  const email = (emailEl.value || '').trim();
+
+  msgEl.style.display = 'none';
+  if (!email) { _fpShow(msgEl, 'Please enter your email address.', 'err'); return; }
+  if (!EMAIL_RE.test(email)) { _fpShow(msgEl, 'Please enter a valid email address.', 'err'); return; }
+
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Sending...';
+  try {
+    // The backend always returns the same generic response whether or not the
+    // email is registered — deliberately, so this screen can never be used to
+    // check which emails have accounts.
+    await AuthAPI.forgotPassword(email);
+    _fpShow(msgEl,
+      `If ${email} belongs to an account, a password reset link is on its way. ` +
+      `It usually arrives within a minute — check your Spam/Junk folder too. The link works once and expires in 1 hour.`,
+      'ok');
+    _startResendCooldown(30);
+  } catch (err) {
+    _fpShow(msgEl,
+      err.status === 429
+        ? 'Too many reset requests. Please wait a while before trying again.'
+        : (err.message || 'Something went wrong — please try again.'),
+      'err');
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fa fa-paper-plane"></i> Send Reset Link';
+  }
+}
+async function submitPasswordReset() {
+  const p1 = document.getElementById('rp-pass1').value;
+  const p2 = document.getElementById('rp-pass2').value;
+  const errEl = document.getElementById('rp-error');
+  const btn = document.getElementById('rp-btn');
+
+  errEl.style.display = 'none';
+  if (!p1 || !p2) {
+    errEl.textContent = 'Please enter and confirm your new password.';
+    errEl.style.display = '';
+    return;
+  }
+  if (p1 !== p2) {
+    errEl.textContent = 'Passwords do not match.';
+    errEl.style.display = '';
+    return;
+  }
+  if (!_resetUid || !_resetToken) {
+    _showResetInvalid();
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Resetting...';
+  try {
+    const done = await AuthAPI.resetPasswordConfirm({
+      uid: _resetUid, token: _resetToken,
+      new_password: p1, new_password_confirm: p2,
+    });
+    _resetEmail = (done && done.email) || null;
+    // The server just revoked every old session for this account — drop any
+    // stale tokens this browser still holds so it can't try to reuse them.
+    try { TokenStore.clear(); } catch (_) {}
+    document.getElementById('rp-pass1').value = '';
+    document.getElementById('rp-pass2').value = '';
+    _resetUid = null; _resetToken = null;
+    _showResetSuccess();
+  } catch (err) {
+    // An invalid/expired/already-used token fails validation on the
+    // backend's side (uid/token fields) — treat any of those as "show the
+    // expired-link screen" rather than a raw inline form error, since a
+    // retry with the same link can't succeed either way. A weak new
+    // password or a mismatch the backend itself catches still shows as a
+    // normal inline message so the person can just fix it and resubmit.
+    // Every API error arrives wrapped as {success:false, error:{message, details:{field:[…]}}}
+    // (apps/core/exceptions.py), so the per-field errors live under error.details —
+    // reading err.data.token directly never matched, and an expired link kept
+    // showing a raw inline error instead of the "Invalid or Expired Link" screen.
+    const fields = (err.data && err.data.error && err.data.error.details) || err.data || {};
+    const badLink = !!(fields && (fields.uid || fields.token));
+    if (badLink) {
+      _showResetInvalid();
+    } else {
+      errEl.textContent = err.message || 'Could not reset password — please try again.';
+      errEl.style.display = '';
+    }
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fa fa-key"></i> Reset Password';
+  }
+}
+
+// Populates the login screen's brand panel with the real uploaded company
+// logo/name (Settings → Company) instead of the hardcoded placeholder —
+// falls back to the default SmartRetail branding if nothing's uploaded yet
+// or the request fails (this runs before anyone is signed in).
+async function loadLoginBranding() {
+  const yearEl = document.getElementById('login-year');
+  if (yearEl) yearEl.textContent = new Date().getFullYear();
+  try {
+    const branding = await SettingsAPI.getPublicBranding();
+    if (branding.logo) {
+      const logoImg = `<img src="${branding.logo}" alt="Company logo">`;
+      const logoEl = document.getElementById('login-brand-logo');
+      if (logoEl) logoEl.innerHTML = logoImg;
+      const topLogoEl = document.getElementById('login-top-brand-logo');
+      if (topLogoEl) topLogoEl.innerHTML = logoImg;
+    }
+    if (branding.name) {
+      const nameEl = document.getElementById('login-brand-name');
+      if (nameEl) nameEl.textContent = branding.name;
+      const topNameEl = document.getElementById('login-top-brand-name');
+      if (topNameEl) topNameEl.textContent = branding.name;
+    }
+  } catch (_) {
+    // No branding uploaded yet, or the request failed — the default
+    // "SmartRetail ERP" text/icon already in the HTML stays as-is.
+  }
+}
+
+// Trailing cursor on the login screen: the dot snaps straight to the real
+// cursor position, while the ring around it eases toward it a little slower.
+// Performance/robustness notes:
+//  - Listeners are attached ONCE (safe to call initLoginCursor() many times).
+//  - The rAF loop starts on demand from mousemove and stops itself once the
+//    ring has caught up, so it never runs (or dies) while the login screen is
+//    hidden. Previously the loop quit forever if it started while the screen
+//    was display:none (e.g. a saved session at page load), so after logout the
+//    ring stayed frozen while only the dot moved.
+//  - No getComputedStyle() per frame (that forced a style recalc every frame
+//    on a very large DOM and was a main cause of the login page hanging).
+function initLoginCursor() {
+  const screen = document.getElementById('login-screen');
+  const dot = document.getElementById('login-cursor-dot');
+  const circle = document.getElementById('login-cursor-circle');
+  if (!screen || !dot || !circle) return;
+  if (screen.dataset.cursorInit) return;
+  if (window.matchMedia('(hover: none), (pointer: coarse)').matches) return;
+  screen.dataset.cursorInit = '1';
+
+  let mouseX = 0, mouseY = 0;
+  let circleX = 0, circleY = 0;
+  let started = false;
+  let rafId = 0;
+
+  function paint() {
+    dot.style.transform = `translate3d(${mouseX}px, ${mouseY}px, 0) translate(-50%, -50%)`;
+    circle.style.transform = `translate3d(${circleX}px, ${circleY}px, 0) translate(-50%, -50%)`;
+  }
+  function tick() {
+    circleX += (mouseX - circleX) * 0.2;
+    circleY += (mouseY - circleY) * 0.2;
+    paint();
+    if (Math.abs(mouseX - circleX) > 0.3 || Math.abs(mouseY - circleY) > 0.3) {
+      rafId = requestAnimationFrame(tick);
+    } else {
+      circleX = mouseX; circleY = mouseY; paint();
+      rafId = 0;
+    }
+  }
+  function kick() { if (!rafId) rafId = requestAnimationFrame(tick); }
+
+  screen.addEventListener('mousemove', e => {
+    mouseX = e.clientX; mouseY = e.clientY;
+    if (!started) { circleX = mouseX; circleY = mouseY; started = true; }
+    dot.classList.add('is-visible');
+    circle.classList.add('is-visible');
+    kick();
+  }, { passive: true });
+  screen.addEventListener('mouseleave', () => {
+    dot.classList.remove('is-visible');
+    circle.classList.remove('is-visible');
+  });
+  screen.addEventListener('mousedown', () => circle.classList.add('is-active'));
+  window.addEventListener('mouseup', () => circle.classList.remove('is-active'));
+  // When the screen is shown again (after logout) re-sync the ring to the dot
+  document.addEventListener('visibilitychange', () => { if (document.hidden) circle.classList.remove('is-visible'); });
+}
+let _lastOrder = null;
+let _editingBookingId = null;
+// Set instead of _editingBookingId when re-opening the booking form to edit
+// an already-finalized invoice in place (see editCompletedSlipFromModal) —
+// saveBooking() checks this to call SalesAPI.edit() instead of create().
+let _editingCompletedSaleId = null;
+// When editing an existing invoice: the "Previous Balance" frozen on it when it
+// was booked — { customerId, value }. The live ledger balance already contains
+// THIS invoice, so showing it as "previous" made the bill look doubled.
+let _bkEditPrev = null;
+// What the invoice looked like when it was opened for editing — used to detect
+// "saved without changing anything" and leave the invoice completely alone.
+let _bkEditOriginal = null;
+// Blocks a second Save click (double-click) while the first is still in flight.
+let _bkSaving = false;
+let _bookingItems = [];
+
+// ═══════════════════════════════════════════════════════
+// AUTH
+// ═══════════════════════════════════════════════════════
+// After a manual sign-in the "shop opening" animation plays (awning drops,
+// shutter rolls up, shelves fill, OPEN sign lights up) while the portal loads
+// underneath, then it fades out over the ready portal. The page-load splash
+// (#splash-screen) is untouched. done() guarantees the whole animation plays
+// (minMs) so it never gets cut off; cancel() removes it at once (e.g. on error).
+const SHOP_OPEN_MS = 3400;   // matches the CSS timeline (~3.2s) + a beat
+// Puts the "OPEN" sign / "Opening your shop" caption back after a sign-out
+// closing animation changed them to "CLOSED" / "Closing your shop".
+function _soResetTexts(s) {
+  const sign = s.querySelector('.so-open-sign');
+  if (sign) sign.textContent = 'OPEN';
+  const cap = s.querySelector('.so-text');
+  if (cap && cap.dataset.openHtml) cap.innerHTML = cap.dataset.openHtml;
+}
+
+// Mirror image of beginPortalLoader: on sign-out the shelves empty, the shutter
+// rolls back down, the sign flips to CLOSED — then the login screen appears.
+// Returns { covered: Promise (resolves once the shop is fully shut),
+//           finish(): fades the overlay away }.
+const SHOP_CLOSE_MS = 2700;
+function beginShopClose() {
+  const s = document.getElementById('shop-open-screen');
+  if (!s) return { covered: Promise.resolve(), finish: () => {} };
+  const srcLogo = document.getElementById('login-brand-logo');
+  const dstLogo = document.getElementById('shop-open-logo');
+  if (srcLogo && dstLogo) dstLogo.innerHTML = srcLogo.innerHTML;
+  const srcName = document.getElementById('login-brand-name');
+  const dstName = document.getElementById('shop-open-name');
+  if (srcName && dstName) dstName.textContent = srcName.textContent;
+
+  const cap = s.querySelector('.so-text');
+  if (cap && !cap.dataset.openHtml) cap.dataset.openHtml = cap.innerHTML;
+  if (cap) cap.innerHTML = 'Closing your shop<span class="splash-dot">.</span><span class="splash-dot">.</span><span class="splash-dot">.</span>';
+  const sign = s.querySelector('.so-open-sign');
+  if (sign) sign.textContent = 'OPEN';
+
+  s.classList.remove('hiding', 'play', 'play-close');
+  s.style.display = 'flex';
+  void s.offsetWidth;
+  s.classList.add('play-close');
+
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const total = reduce ? 600 : SHOP_CLOSE_MS;
+  const flip = setTimeout(() => { if (sign) sign.textContent = 'CLOSED'; }, reduce ? 200 : 1900);
+  const covered = new Promise(r => setTimeout(r, total));
+  return {
+    covered,
+    finish: () => {
+      clearTimeout(flip);
+      s.classList.add('hiding');
+      setTimeout(() => {
+        s.style.display = 'none';
+        s.classList.remove('hiding', 'play-close');
+        _soResetTexts(s);
+      }, 450);
+    },
+  };
+}
+
+function beginPortalLoader(minMs = SHOP_OPEN_MS) {
+  const s = document.getElementById('shop-open-screen');
+  if (!s) return { done: async () => {}, cancel: () => {} };
+
+  // Use the real company logo/name (already loaded for the login screen)
+  const srcLogo = document.getElementById('login-brand-logo');
+  const dstLogo = document.getElementById('shop-open-logo');
+  if (srcLogo && dstLogo) dstLogo.innerHTML = srcLogo.innerHTML;
+  const srcName = document.getElementById('login-brand-name');
+  const dstName = document.getElementById('shop-open-name');
+  if (srcName && dstName) dstName.textContent = srcName.textContent;
+
+  // Restart the CSS timeline from the beginning
+  _soResetTexts(s);
+  s.classList.remove('hiding', 'play', 'play-close');
+  s.style.display = 'flex';
+  void s.offsetWidth;                 // force reflow so animations restart
+  s.classList.add('play');
+
+  const start = Date.now();
+  let hideTimer = null;
+  function hide() {
+    s.classList.add('hiding');
+    hideTimer = setTimeout(() => {
+      s.style.display = 'none';
+      s.classList.remove('hiding', 'play');
+    }, 450);
+  }
+  return {
+    done: async () => {
+      const wait = Math.max(0, minMs - (Date.now() - start));
+      await new Promise(r => setTimeout(r, wait));
+      hide();
+    },
+    cancel: () => {
+      clearTimeout(hideTimer);
+      s.style.display = 'none';
+      s.classList.remove('hiding', 'play');
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════════════
+// PRINT ANIMATIONS
+// ═══════════════════════════════════════════════════════
+// Plays a short full-screen animation right before the browser's print
+// dialog opens, styled like the shop-opening screen:
+//   'slip'  → printer loads, paper feeds in, printed slip comes out  (Sale Slips)
+//   'cash'  → banknotes are counted from one stack to the other      (Collection)
+//   'order' → a person walks across carrying a product carton        (Order Summary)
+const PRINT_ANIM = {
+  slip:  { ms: 1200, label: [[0, 'Loading printer'],   [450, 'Printing slips']] },
+  cash:  { ms: 1300, label: [[0, 'Counting cash'],     [900, 'Opening print']] },
+  order: { ms: 1200, label: [[0, 'Carrying your order'], [800, 'Opening print']] },
+};
+let _printAnimBusy = false;
+function playPrintAnim(kind) {
+  const cfg = PRINT_ANIM[kind];
+  const s = document.getElementById('print-anim-screen');
+  if (!cfg || !s) return Promise.resolve();
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const ms = reduce ? 500 : cfg.ms;
+  const timers = [];
+  const label = document.getElementById('pa-label');
+  const countEl = document.getElementById('pa-count-num');
+
+  s.classList.remove('hiding', 'k-slip', 'k-cash', 'k-order');
+  s.classList.add('k-' + kind);
+  s.style.setProperty('--pa-ms', ms + 'ms');
+  s.style.display = '';                 // let .show control it
+  s.classList.remove('show');
+  void s.offsetWidth;                   // restart every CSS animation
+  s.classList.add('show');
+
+  cfg.label.forEach(([t, txt]) => timers.push(setTimeout(() => { if (label) label.textContent = txt; }, reduce ? 0 : t)));
+  if (label) label.textContent = cfg.label[0][1];
+
+  // cash: the "notes counted" ticker follows each note landing on the right stack
+  if (kind === 'cash' && countEl) {
+    countEl.textContent = '0';
+    for (let i = 0; i < 12; i++) {
+      timers.push(setTimeout(() => { countEl.textContent = String(i + 1); }, 100 + i * 85));
+    }
+  }
+
+  return new Promise(resolve => {
+    timers.push(setTimeout(() => {
+      s.classList.add('hiding');
+      timers.push(setTimeout(() => {
+        s.classList.remove('show', 'hiding', 'k-slip', 'k-cash', 'k-order');
+        resolve();
+      }, 350));
+    }, ms));
+  });
+}
+
+// Runs the animation, then shows the print area and opens the print dialog.
+// Returns false (and does nothing) if an animation is already running, so a
+// double-click can't open the print dialog twice.
+async function animatedPrint(kind, area) {
+  if (_printAnimBusy) return false;
+  _printAnimBusy = true;
+  try {
+    if (area) area.style.display = 'none';
+    await playPrintAnim(kind);
+    if (area) area.style.display = 'block';
+    await new Promise(r => setTimeout(r, 60));    // let the print layout render
+    // Images (company logo, invoice QR) must be loaded or they print as an empty gap.
+    const imgs = area ? Array.from(area.querySelectorAll('img')) : [];
+    if (imgs.length) {
+      await Promise.race([
+        Promise.all(imgs.map(im => (im.complete ? 1 : new Promise(r => { im.onload = im.onerror = r; })))),
+        new Promise(r => setTimeout(r, 2500)),
+      ]);
+    }
+    window.print();
+    return true;
+  } finally {
+    _printAnimBusy = false;
+  }
+}
+// ── Login rate-limit countdown ─────────────────────────────────────────────
+// When the server answers 429 (too many login attempts) we show
+// "Login Limit Reached - try again later" under the form with a live countdown
+// (seconds, or minutes + seconds when the wait is long) and keep Sign In
+// disabled until the wait is over.
+let _loginCooldownTimer = null;
+function _fmtLoginWait(sec) {
+  if (sec < 60) return `${sec} second${sec === 1 ? '' : 's'}`;
+  const m = Math.floor(sec / 60), r = sec % 60;
+  return r ? `${m} min ${String(r).padStart(2, '0')} sec` : `${m} min`;
+}
+function _startLoginCooldown(seconds) {
+  const errorBox = document.getElementById('login-error');
+  const btn = document.getElementById('login-btn');
+  if (_loginCooldownTimer) clearInterval(_loginCooldownTimer);
+  const until = Date.now() + Math.max(1, Math.ceil(seconds)) * 1000;
+  btn.disabled = true;
+  const tick = () => {
+    const left = Math.ceil((until - Date.now()) / 1000);
+    if (left <= 0) {
+      clearInterval(_loginCooldownTimer);
+      _loginCooldownTimer = null;
+      errorBox.style.display = 'none';
+      btn.disabled = false;
+      return;
+    }
+    errorBox.innerHTML = '<strong>Login Limit Reached</strong> &mdash; Try again later.<br>' +
+      '<i class="fa fa-clock"></i> You can try again in <strong>' + _fmtLoginWait(left) + '</strong>';
+    errorBox.style.display = 'block';
+  };
+  tick();
+  _loginCooldownTimer = setInterval(tick, 1000);
+}
+async function doLogin() {
+  if (_loginCooldownTimer) return;   // still locked out - ignore clicks / Enter
+  const email = document.getElementById('l-user').value.trim();
+  const password = document.getElementById('l-pass').value.trim();
+  const errorBox = document.getElementById('login-error');
+  const btn = document.getElementById('login-btn');
+  errorBox.style.display = 'none';
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Signing in...';
+  let loader = null;
+  try {
+    const user = await AuthAPI.login(email, password);
+    loader = beginPortalLoader();
+    await loginAs(user);
+    await loader.done();
+    loader = null;
+  } catch (err) {
+    if (loader) { loader.cancel(); loader = null; }
+    if (err.status === 429) {
+      const wait = Number(err.data && err.data.error && err.data.error.details && err.data.error.details.retry_after) || 60;
+      _startLoginCooldown(wait);
+    } else {
+      errorBox.textContent = err.message || 'Invalid email or password';
+      errorBox.style.display = 'block';
+      toast(err.message || 'Login failed', 'error');
+    }
+  } finally {
+    if (!_loginCooldownTimer) btn.disabled = false;
+    btn.innerHTML = '<i class="fa fa-sign-in-alt"></i> Sign In';
+  }
+}
+function quickLogin(email, password) {
+  document.getElementById('l-user').value = email;
+  document.getElementById('l-pass').value = password;
+  doLogin();
+}
+// Mirrors the backend's real permission classes (apps/core/permissions.py) —
+// a role only appears in a page's list here if the API it needs would
+// actually accept it. This is what keeps "the tab is visible" and "the
+// button under it actually works" in sync; a role that isn't listed for a
+// page would hit a 403 from the backend anyway if we let it in.
+const ROLE_PAGES = {
+  manager: ['dashboard','pos','posgroup','posbills','booking','saleslips','salereturn','orders','ordersummary',
+            'products','inventory','stockreport','purchases','purchasereturn','suppliers',
+            'customers','collection','expenses','ledger','balancesheet','accounting',
+            'reports','supplyroutes','bankrec'],
+  inventory_manager: ['products','inventory','stockreport','purchases','purchasereturn','suppliers'],
+  cashier: ['pos','posgroup','posbills','booking','saleslips','salereturn','orders','customers','collection'],
+  salesperson: ['booking','saleslips'],
+};
+
+function _applyRoleNav(role) {
+  const fullAccess = role === 'super_admin' || role === 'admin';
+  const allowed = fullAccess ? null : (ROLE_PAGES[role] || []);
+
+  document.querySelectorAll('.nav-item').forEach(el => {
+    const page = el.dataset.page;
+    el.style.display = (fullAccess || allowed.includes(page)) ? '' : 'none';
+  });
+  document.getElementById('admin-nav').style.display = fullAccess ? '' : 'none';
+
+  // Hide a whole section header (e.g. "Administration") when every item
+  // under it is hidden, instead of leaving a floating label over nothing.
+  document.querySelectorAll('.nav-section').forEach(section => {
+    const items = section.querySelectorAll('.nav-item');
+    const anyVisible = Array.from(items).some(el => el.style.display !== 'none');
+    section.style.display = (items.length === 0 || anyVisible) ? '' : 'none';
+  });
+
+  return fullAccess ? 'dashboard' : (allowed[0] || 'dashboard');
+}
+
+async function loginAs(user) {
+  currentUser = user;
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').classList.add('visible');
+  // Sidebar user row — the actual logged-in person's name + role (Manager,
+  // Cashier, Salesperson, whatever their account is set to), never a fixed
+  // placeholder.
+  document.getElementById('u-name').textContent = user.full_name || user.email;
+  document.getElementById('u-role').textContent = (user.role || '').replace(/_/g, ' ');
+  document.getElementById('u-avatar').textContent = (user.full_name || user.email)[0].toUpperCase();
+  document.getElementById('dash-user').textContent = (user.full_name || user.email).split(' ')[0];
+  // Sidebar top logo/name — was always the hardcoded "SmartRetail ERP"
+  // mark regardless of what company logo/name is uploaded in Settings.
+  // Now it shows the real uploaded branding once logged in, same as the
+  // login screen and printed invoices already do.
+  SettingsAPI.getPublicBranding().then(branding => {
+    if (branding.logo) {
+      const logoEl = document.getElementById('sidebar-logo');
+      if (logoEl) logoEl.innerHTML = `<img src="${branding.logo}" alt="Company logo" style="width:100%;height:100%;object-fit:contain;border-radius:inherit">`;
+    }
+    if (branding.name) {
+      const nameEl = document.getElementById('sidebar-brand-name');
+      const verEl = document.getElementById('sidebar-brand-version');
+      if (nameEl && verEl) nameEl.innerHTML = `${branding.name}<span id="sidebar-brand-version">${verEl.textContent}</span>`;
+    }
+  }).catch(() => {
+    // No branding uploaded, or the request failed — the default
+    // "SmartRetail ERP" logo/name already in the HTML stays as-is.
+  });
+
+  const landingPage = _applyRoleNav(user.role);
+  const landingReady = initApp(landingPage);
+  // Resolve only once the landing page has loaded its data (never longer than
+  // 2.5s), so whatever loader is covering the screen lifts on a finished portal.
+  await Promise.race([
+    Promise.resolve(landingReady).catch(() => {}),
+    new Promise(r => setTimeout(r, 2500)),
+  ]);
+}
+async function doLogout() {
+  const ok = await confirmModal('You will be signed out of SmartRetail ERP.', {
+    danger: false, icon: 'fa-sign-out-alt', title: 'Sign Out?', confirmText: 'Sign Out',
+  });
+  if (ok) {
+    const closer = beginShopClose();
+    // Sign out on the server while the shutter comes down; wait for both so
+    // the closing animation always plays in full.
+    await Promise.all([AuthAPI.logout(), closer.covered]);
+    document.getElementById('app').classList.remove('visible');
+    document.getElementById('login-screen').style.display = 'flex';
+    initLoginCursor();
+    currentUser = null;
+    document.getElementById('admin-nav').style.display = '';
+    document.querySelectorAll('.nav-item').forEach(e => e.style.display = '');
+    document.querySelectorAll('.nav-section').forEach(e => e.style.display = '');
+    closer.finish();   // lift the overlay over the login screen
+  }
+}
+
+// ── PERMISSION CHECK ─────────────────────────────────────
+function hasPermission(page) {
+  if (!currentUser) return false;
+  if (currentUser.role === 'super_admin' || currentUser.role === 'admin') return true;
+  return (ROLE_PAGES[currentUser.role] || []).includes(page);
+}
+
+// ═══════════════════════════════════════════════════════
+// NAVIGATION
+// ═══════════════════════════════════════════════════════
+const pageTitles = {
+  dashboard: 'Dashboard Overview',
+  pos: 'POS Terminal',
+  posbills: 'POS Bills',
+  booking: 'Order Booking',
+  saleslips: 'Sale Slips',
+  salereturn: 'Sale Return',
+  products: 'Product Management',
+  inventory: 'Inventory Management',
+  orders: 'Order Management',
+  customers: 'Customer Management',
+  suppliers: 'Supplier Management',
+  purchases: 'Purchase Management',
+  purchasereturn: 'Purchase Return',
+  expenses: 'Expense Management',
+  ledger: 'Ledger Accounts',
+  balancesheet: 'Balance Sheet',
+  accounting: 'Accounting & Ledger',
+  reports: 'Reports & Analytics',
+  stockreport: 'Stock Report',
+  supplyroutes: 'Supply Routes',
+  ordersummary: 'Order Summary',
+  users: 'User Management',
+  settings: 'System Settings',
+  collection: 'Customer Collection',
+};
+function navigate(page) {
+  document.querySelectorAll('.page').forEach(p => { p.classList.remove('active'); p.style.display = 'none'; });
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const el = document.getElementById('page-' + page);
+  if (el) {
+    el.classList.add('active');
+    el.style.display = (page === 'pos') ? 'flex' : 'block';
+  }
+  const nav = document.querySelector(`.nav-item[data-page="${page}"]`);
+  if (nav) nav.classList.add('active');
+  document.getElementById('page-title').textContent = pageTitles[page] || page;
+  if (page === 'pos' || page === 'posbills') posToggleGroup(true);   // keep the POS Terminal group open on its own pages
+  const renders = {
+    dashboard: renderDashboard,
+    products: renderProducts,
+    inventory: renderInventory,
+    orders: renderOrders,
+    customers: renderCustomers,
+    suppliers: renderSuppliers,
+    purchases: renderPurchases,
+    expenses: renderExpenses,
+    ledger: renderLedger,
+    balancesheet: renderBalanceSheet,
+    accounting: renderAccounting,
+    reports: renderReports,
+    stockreport: renderStockReport,
+    supplyroutes: renderSupplyRoutes,
+    ordersummary: openOrderSummaryTab,
+    users: renderUsers,
+    pos: initPOS,
+    posbills: renderPosBills,
+    booking: initBooking,
+    saleslips: renderSaleSlips,
+    salereturn: renderSaleReturn,
+    purchasereturn: renderPurchaseReturns,
+    settings: renderSettings,
+  };
+  // Keep the render's promise (if it returns one) so callers like loginAs can
+  // wait until the page has really loaded its data. Existing callers ignore it.
+  let _renderResult = null;
+  try { if (renders[page]) _renderResult = renders[page](); } catch (e) { console.error(e); }
+  // Wires the modern date/time picker onto any of its known field-ids that
+  // exist on whichever page just rendered (booking, saleslips, salereturn,
+  // etc.) — a no-op for pages that don't have any of those ids, and safe
+  // to call repeatedly (each field only gets wired once).
+  wireModernDateTimeInputs();
+  ['bk-date-filter', 'ss-date-from', 'ss-date-to', 'sr-date-from', 'sr-date-to'].forEach(id => syncDtDisplay(id));
+  document.getElementById('notif-panel').classList.add('hidden');
+  // Close sidebar on mobile after navigation
+  closeSidebarMobile();
+  return _renderResult;
+}
+
+// ═══════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════
+function initApp(landingPage) {
+  initTheme();
+  const landing = navigate(landingPage || 'dashboard');
+  setInterval(updateClock, 1000);
+  updateClock();
+  updatePosCustomers();
+  SettingsAPI.getCompany().then(s => { _companySettingsCache = s; }).catch(() => {});
+  renderNotifications();
+  // Keep the bell reasonably fresh without the person needing to reload —
+  // re-checks every 2 minutes while the app is open.
+  setInterval(renderNotifications, 120000);
+  return landing;
+}
+function updateClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+}
+function toggleNotif() {
+  const panel = document.getElementById('notif-panel');
+  const wasHidden = panel.classList.contains('hidden');
+  panel.classList.toggle('hidden');
+  if (wasHidden) renderNotifications(); // refresh right as it's opened
+}
+
+function _notifRelativeTime(iso) {
+  if (!iso) return '';
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  return Math.floor(hrs / 24) + 'd ago';
+}
+
+// Notification bell — previously always showed the same 3 hardcoded demo
+// items (Coca-Cola low stock, a Milk expiry warning, Order #ORD-0042) no
+// matter what was actually happening in the store. Now built from real
+// data: low/out-of-stock items (same source as the Dashboard's low-stock
+// card) and the most recently completed sales. There's no expiry-date
+// field anywhere in the backend's Product model, so the old "Expiry
+// Warning" notification type is dropped rather than faked.
+async function renderNotifications() {
+  const items = [];
+
+  try {
+    const summary = await DashboardAPI.summary();
+    (summary.low_stock_items || []).slice(0, 5).forEach(p => {
+      const isOut = Number(p.quantity) === 0;
+      items.push({
+        icon: 'fa-exclamation-triangle',
+        bg: 'var(--red-glow)', color: 'var(--red)',
+        title: isOut ? 'Out of Stock' : 'Low Stock Alert',
+        sub: `${p.product_name} — ${isOut ? 'No units left' : p.quantity + ' unit' + (p.quantity !== 1 ? 's' : '') + ' left'}`,
+        time: '', sortKey: Infinity, // no real timestamp on a stock LEVEL — always float to the top
+      });
+    });
+  } catch (_) { /* Dashboard summary is manager+ only — cashiers/salespeople just skip this section */ }
+
+  try {
+    const salesData = await SalesAPI.list({ ordering: '-created_at', page_size: 5 });
+    (salesData.results || salesData)
+      .filter(s => s.status === 'completed')
+      .slice(0, 5)
+      .forEach(s => {
+        items.push({
+          icon: 'fa-check-circle',
+          bg: 'var(--green-glow)', color: 'var(--green)',
+          title: 'Order Completed',
+          sub: `Invoice ${s.invoice_number} — Rs.${Number(s.total_amount).toFixed(2)}`,
+          time: _notifRelativeTime(s.created_at),
+          sortKey: new Date(s.created_at || 0).getTime(),
+        });
+      });
+  } catch (_) { /* ignore — leave whatever notifications we already have */ }
+
+  items.sort((a, b) => (b.sortKey || 0) - (a.sortKey || 0));
+
+  const count = items.length;
+  const bellBadge = document.querySelector('#notif-btn .badge');
+  if (bellBadge) {
+    bellBadge.textContent = count;
+    bellBadge.style.display = count ? '' : 'none';
+  }
+  const panelBadge = document.getElementById('notif-panel-badge');
+  if (panelBadge) {
+    panelBadge.textContent = count + ' new';
+    panelBadge.style.display = count ? '' : 'none';
+  }
+  const list = document.getElementById('notif-panel-list');
+  if (list) {
+    list.innerHTML = count
+      ? items.map(n => `
+        <div class="notif-item">
+          <div class="notif-icon" style="background:${n.bg};color:${n.color}"><i class="fa ${n.icon}"></i></div>
+          <div class="notif-text">
+            <div class="notif-title">${n.title}</div>
+            <div class="notif-sub">${n.sub}</div>
+          </div>
+          <div class="notif-time">${n.time}</div>
+        </div>`).join('')
+      : `<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px">No notifications right now</div>`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════
+async function renderDashboard() {
+  let summary;
+  try {
+    summary = await DashboardAPI.summary();
+  } catch (err) {
+    // Cashiers/salespersons don't have dashboard permissions (manager+ only) —
+    // show zeros instead of crashing the page.
+    document.getElementById('d-revenue').textContent = '—';
+    document.getElementById('d-orders').textContent = '—';
+    document.getElementById('d-customers').textContent = '—';
+    document.getElementById('d-lowstock').textContent = '—';
+    return;
+  }
+
+  document.getElementById('d-revenue').textContent = 'Rs.' + Number(summary.today_sales).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+  document.getElementById('d-orders').textContent = summary.today_orders_count;
+  document.getElementById('d-customers').textContent = summary.total_customers;
+  document.getElementById('d-lowstock').textContent = summary.low_stock_items.length;
+
+  // Recent transactions
+  const tbody = document.getElementById('recent-tx');
+  const salesData = await SalesAPI.list({ ordering: '-created_at', page_size: 6 });
+  const recent = salesData.results || salesData;
+  tbody.innerHTML = recent.map(o => `
+    <tr>
+      <td class="td-mono">${o.invoice_number}</td>
+      <td>${o.customer_name || 'Walk-in'}</td>
+      <td>${o.items.length}</td>
+      <td class="fw-700 text-green">Rs.${Number(o.total_amount).toFixed(2)}</td>
+      <td><span class="badge badge-blue">${(o.payments[0]?.method||'—').toUpperCase()}</span></td>
+      <td><span class="badge badge-green">${o.status}</span></td>
+    </tr>`).join('');
+
+  // Top products (real, from backend aggregation)
+  const tp = document.getElementById('top-products-list');
+  const maxQty = Math.max(1, ...summary.top_selling_products.map(p=>p.total_quantity));
+  tp.innerHTML = summary.top_selling_products.map((p, i) => `
+    <div style="margin-bottom:16px;opacity:0;animation:fadeUp .45s cubic-bezier(.22,1,.36,1) ${i * .06}s both">
+      <div class="flex-between" style="margin-bottom:6px">
+        <span style="font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px">
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;background:var(--accent-glow);color:var(--accent);font-size:10px;font-weight:800;flex-shrink:0">${i + 1}</span>
+          ${p.product__name}
+        </span>
+        <span style="font-size:12px;color:var(--text-secondary);font-weight:600;flex-shrink:0">${p.total_quantity} units sold</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" style="width:${(p.total_quantity/maxQty*100).toFixed(0)}%"></div>
+      </div>
+    </div>`).join('') || '<div style="color:var(--text-muted);font-size:13px">No sales in the last 30 days</div>';
+
+  // Low stock table (real, from backend)
+  const lstBody = document.getElementById('low-stock-table');
+  lstBody.innerHTML = summary.low_stock_items.map(p => {
+    const statusColor = p.quantity === 0 ? 'red' : 'yellow';
+    const statusText = p.quantity === 0 ? 'Out of Stock' : 'Low Stock';
+    return `<tr>
+      <td><div class="flex-gap"><span style="font-size:20px">📦</span><strong>${p.product_name}</strong></div></td>
+      <td class="td-mono">${p.sku}</td>
+      <td>${p.warehouse}</td>
+      <td><strong class="text-${statusColor}">${p.quantity}</strong></td>
+      <td>${p.reorder_level}</td>
+      <td><span class="badge badge-${statusColor}">${statusText}</span></td>
+      <td><button class="btn btn-accent btn-xs" onclick="openStockModal(${p.product_id})">Restock</button></td>
+    </tr>`;
+  }).join('');
+
+  await renderCharts(summary);
+}
+
+// ═══════════════════════════════════════════════════════
+// SALES OVERVIEW — FALLBACK ONLY. The normal chart is the CanvasJS bubble chart
+// in renderCharts(); this plain-SVG copy is drawn only when CanvasJS (CDN) fails
+// to load, so the card is never blank. x = day, y = revenue, size = orders.
+// ═══════════════════════════════════════════════════════
+function renderSalesBubbleSvg(host, series, days) {
+  const ck = _ckTheme();
+  const pad2 = n => String(n).padStart(2, '0');
+  const iso = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const byDay = {};
+  series.forEach(s => { byDay[String(s.day).slice(0, 10)] = s; });
+
+  const pts = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - i);
+    const s = byDay[iso(d)];
+    pts.push({ d, total: s ? Number(s.total) || 0 : 0, orders: s ? Number(s.orders) || 0 : 0 });
+  }
+  const maxTotal = Math.max(...pts.map(p => p.total));
+  if (!(maxTotal > 0)) {
+    host.innerHTML = `<div class="rpie-empty"><i class="fa fa-chart-line"></i><span>No sales in the last ${days} days</span></div>`;
+    return;
+  }
+
+  // "Nice" Y ceiling + 5 grid steps.
+  const rough = maxTotal * 1.15 / 5, mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= rough) || rough;
+  const yMax = step * 5;
+  const fmtK = v => v >= 1000 ? 'Rs. ' + (Math.round(v / 100) / 10) + 'k' : 'Rs. ' + Math.round(v);
+
+  const W = 700, H = 380, L = 70, R = 18, T = 26, B = 46;
+  const pw = W - L - R, ph = H - T - B;
+  const xAt = i => L + (pts.length === 1 ? pw / 2 : (i + 0.5) * pw / pts.length);
+  const yAt = v => T + ph - (v / yMax) * ph;
+  const maxOrders = Math.max(...pts.map(p => p.orders), 1);
+  const rMin = days > 7 ? 4 : 7, rMax = days > 7 ? 11 : 24;
+
+  let g = '';
+  for (let k = 0; k <= 5; k++) {
+    const v = step * k, y = yAt(v);
+    g += `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" stroke="${ck.grid}" stroke-width="1"/>`;
+    g += `<text x="${L - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="${ck.text}">${fmtK(v)}</text>`;
+  }
+  g += `<text transform="translate(14 ${T + ph / 2}) rotate(-90)" text-anchor="middle" font-size="11" fill="${ck.text}">Revenue (Rs.)</text>`;
+
+  const every = days > 7 ? 5 : 1;
+  pts.forEach((p, i) => {
+    const x = xAt(i), y = yAt(p.total);
+    if (i % every === 0 || i === pts.length - 1) {
+      g += `<text x="${x}" y="${H - B + 18}" text-anchor="middle" font-size="11" fill="${ck.text}">${p.d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</text>`;
+    }
+    const tip = `${p.d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} — Revenue: Rs. ${p.total.toFixed(2)} · Orders: ${p.orders}`;
+    if (p.total <= 0) {
+      g += `<circle cx="${x}" cy="${yAt(0)}" r="3" fill="${ck.grid}"><title>${tip}</title></circle>`;
+      return;
+    }
+    const r = rMin + Math.sqrt(p.orders / maxOrders) * (rMax - rMin);
+    const col = CHART_PALETTE[i % CHART_PALETTE.length];
+    g += `<line x1="${x}" y1="${y}" x2="${x}" y2="${yAt(0)}" stroke="${col}" stroke-opacity=".25" stroke-dasharray="3 3"/>`;
+    g += `<circle cx="${x}" cy="${y}" r="${r.toFixed(1)}" fill="${col}" fill-opacity=".82" stroke="${col}" stroke-width="1.5"><title>${tip}</title></circle>`;
+    if (days <= 7) g += `<text x="${x}" y="${y - r - 6}" text-anchor="middle" font-size="10.5" font-weight="700" fill="${ck.text}">${fmtK(p.total)}</text>`;
+  });
+  g += `<circle cx="${L + 6}" cy="${H - 8}" r="5" fill="${CHART_PALETTE[0]}"/><text x="${L + 16}" y="${H - 4}" font-size="11" fill="${ck.text}">Bubble size = orders that day</text>`;
+
+  host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Sales overview, last ${days} days" style="display:block;font-family:'Plus Jakarta Sans',sans-serif">${g}</svg>`;
+}
+
+// ═══════════════════════════════════════════════════════
+// SALES OVERVIEW — RESPONSIVE BUBBLE CHART (plain SVG, no library)
+// Measures the real size of its box and lays everything out for THAT size —
+// margins from the widest axis label, tick count from the height, bubble size
+// from the room per day, fonts scaled with the box — so it stays tidy at any
+// browser zoom (100% / 70% / 60%…), window size or sidebar state. Redraws on resize.
+// ═══════════════════════════════════════════════════════
+let _salesBubbleState = { series: [], days: 7, w: 0, h: 0 };
+
+function _drawSalesBubble() {
+  const host = document.getElementById('salesChart');
+  if (!host || !host.offsetParent) return;
+  const { series, days } = _salesBubbleState;
+  const w = Math.max(260, Math.floor(host.clientWidth)), h = Math.max(240, Math.floor(host.clientHeight));
+  const animate = _salesBubbleState.w === 0;            // pop-in only the first time
+  _salesBubbleState.w = w; _salesBubbleState.h = h;
+  host.style.position = 'relative';
+
+  const ck = _ckTheme();
+  const pad2 = n => String(n).padStart(2, '0');
+  const iso = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const byDay = {};
+  series.forEach(s => { byDay[String(s.day).slice(0, 10)] = s; });
+  const pts = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - i);
+    const s = byDay[iso(d)];
+    pts.push({ d, total: s ? Number(s.total) || 0 : 0, orders: s ? Number(s.orders) || 0 : 0 });
+  }
+  const maxTotal = Math.max(...pts.map(p => p.total));
+  if (!(maxTotal > 0)) {
+    host.innerHTML = `<div class="rpie-empty"><i class="fa fa-chart-line"></i><span>No sales in the last ${days} days</span></div>`;
+    return;
+  }
+
+  // one scale factor drives every font / gap, bounded so nothing gets silly
+  const s = Math.max(0.82, Math.min(1.4, Math.min(w / 720, h / 380)));
+  const fTick = 11 * s, fLbl = 10.5 * s, fTitle = 11 * s;
+
+  // y axis: tick count follows the height, labels are compact
+  const nTicks = Math.max(3, Math.min(6, Math.floor(h / (62 * s))));
+  const rough = maxTotal * 1.12 / nTicks, mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(v => v >= rough) || rough;
+  const yMax = step * nTicks;
+  const fmt = v => v >= 1e6 ? 'Rs. ' + (Math.round(v / 1e5) / 10) + 'M' : v >= 1000 ? 'Rs. ' + (Math.round(v / 100) / 10) + 'k' : 'Rs. ' + Math.round(v);
+
+  // margins come from what has to fit (axis title never collides with the numbers)
+  const widest = fmt(yMax).length;
+  const tickW = widest * fTick * 0.62;
+  const titleW = fTitle + 8 * s;
+  const L = Math.round(titleW + tickW + 18 * s), R = Math.round(16 * s);
+  const T = Math.round(30 * s), B = Math.round(58 * s);
+  const pw = w - L - R, ph = h - T - B;
+  const n = pts.length;
+  const slot = pw / n;
+  const xAt = i => L + (i + 0.5) * slot;
+  const yAt = v => T + ph - (v / yMax) * ph;
+
+  const maxOrders = Math.max(...pts.map(p => p.orders), 1);
+  const rMax = Math.max(6, Math.min(slot * 0.42, ph * 0.13, 34 * s));
+  const rMin = Math.max(3.5, rMax * 0.36);
+
+  let g = '';
+  for (let k = 0; k <= nTicks; k++) {
+    const v = step * k, y = yAt(v);
+    g += `<line x1="${L}" y1="${y.toFixed(1)}" x2="${w - R}" y2="${y.toFixed(1)}" stroke="${ck.grid}" stroke-width="1"/>`;
+    g += `<text x="${L - 8 * s}" y="${(y + fTick * 0.35).toFixed(1)}" text-anchor="end" font-size="${fTick.toFixed(1)}" fill="${ck.text}">${fmt(v)}</text>`;
+  }
+  g += `<text transform="translate(${(fTitle * 0.9).toFixed(1)} ${(T + ph / 2).toFixed(1)}) rotate(-90)" text-anchor="middle" font-size="${fTitle.toFixed(1)}" fill="${ck.text}">Revenue (Rs.)</text>`;
+
+  // x labels: only as many as fit
+  const labW = 54 * s;
+  const every = Math.max(1, Math.ceil(labW / slot));
+  let bubbles = '';
+  pts.forEach((p, i) => {
+    const x = xAt(i), y = yAt(p.total);
+    const showLbl = (n - 1 - i) % every === 0;
+    if (showLbl) g += `<text x="${x.toFixed(1)}" y="${(h - B + 20 * s).toFixed(1)}" text-anchor="middle" font-size="${fTick.toFixed(1)}" fill="${ck.text}">${p.d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</text>`;
+    if (p.total <= 0) { g += `<circle cx="${x.toFixed(1)}" cy="${yAt(0).toFixed(1)}" r="${(3 * s).toFixed(1)}" fill="${ck.grid}"/>`; return; }
+    const r = rMin + Math.sqrt(p.orders / maxOrders) * (rMax - rMin);
+    const col = CHART_PALETTE[i % CHART_PALETTE.length];
+    g += `<line x1="${x.toFixed(1)}" y1="${y.toFixed(1)}" x2="${x.toFixed(1)}" y2="${yAt(0).toFixed(1)}" stroke="${col}" stroke-opacity=".25" stroke-dasharray="3 3"/>`;
+    bubbles += `<g class="sb-b" data-i="${i}" style="${animate ? `animation:sbPop .55s cubic-bezier(.2,.8,.2,1) ${i * 45}ms both;` : ''}transform-box:fill-box;transform-origin:center;cursor:pointer">
+      <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}" fill="${col}" fill-opacity=".82" stroke="${col}" stroke-width="1.5"/></g>`;
+    // value label above the bubble when there is room for it
+    if (slot >= 46 * s) bubbles += `<text x="${x.toFixed(1)}" y="${Math.max(fLbl + 2, y - r - 6 * s).toFixed(1)}" text-anchor="middle" font-size="${fLbl.toFixed(1)}" font-weight="700" fill="${ck.text}" style="pointer-events:none">${fmt(p.total)}</text>`;
+  });
+  // legend
+  const ly = h - 10 * s;
+  g += `<circle cx="${(L + 6 * s).toFixed(1)}" cy="${(ly - fTick * 0.3).toFixed(1)}" r="${(5 * s).toFixed(1)}" fill="${CHART_PALETTE[0]}"/><text x="${(L + 16 * s).toFixed(1)}" y="${ly.toFixed(1)}" font-size="${fTick.toFixed(1)}" fill="${ck.text}">Bubble size = orders that day</text>`;
+
+  host.innerHTML = `<style>@keyframes sbPop{from{transform:scale(.2);opacity:0}to{transform:scale(1);opacity:1}}</style>
+    <svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="Sales overview, last ${days} days" style="display:block;font-family:'Plus Jakarta Sans',sans-serif">${g}${bubbles}</svg>
+    <div id="sb-tip" style="position:absolute;display:none;pointer-events:none;z-index:5;background:var(--bg-card-hover);border:1px solid var(--border-light);border-radius:10px;padding:8px 12px;font-size:12px;box-shadow:var(--shadow);white-space:nowrap"></div>`;
+
+  const tip = document.getElementById('sb-tip');
+  host.querySelectorAll('.sb-b').forEach(el => {
+    const p = pts[+el.dataset.i], col = CHART_PALETTE[+el.dataset.i % CHART_PALETTE.length];
+    el.addEventListener('mousemove', ev => {
+      const box = host.getBoundingClientRect();
+      tip.innerHTML = `<div style="font-weight:800;color:${col};margin-bottom:2px">${p.d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</div>
+        <div style="color:var(--text-primary);font-weight:700">Revenue: Rs. ${p.total.toLocaleString('en-US', { maximumFractionDigits: 2 })}</div>
+        <div style="color:var(--text-secondary)">Orders: ${p.orders}</div>`;
+      tip.style.display = 'block';
+      let x = ev.clientX - box.left + 14; if (x + tip.offsetWidth > box.width) x = ev.clientX - box.left - tip.offsetWidth - 14;
+      tip.style.left = Math.max(0, x) + 'px'; tip.style.top = Math.max(0, ev.clientY - box.top - tip.offsetHeight - 10) + 'px';
+      el.firstElementChild.setAttribute('fill-opacity', '1');
+    });
+    el.addEventListener('mouseleave', () => { tip.style.display = 'none'; el.firstElementChild.setAttribute('fill-opacity', '.82'); });
+  });
+}
+
+// Sales Overview: the card sits in a 2-column grid row and is stretched to the
+// height of the taller neighbour (Category Breakdown), which used to leave an
+// empty strip under the chart. Measure the card and let the chart fill it
+// (never smaller than the original 380px). Re-fits on window resize.
+function _fitSalesChartHeight(sc) {
+  const BASE = 380;
+  const card = sc.closest('.card'), body = sc.parentElement;
+  if (!card || !body) return BASE;
+  sc.style.height = BASE + 'px';                       // measure from the default size
+  const cs = getComputedStyle(body);
+  const header = card.firstElementChild && card.firstElementChild !== body ? card.firstElementChild.offsetHeight : 0;
+  const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  const h = Math.max(BASE, Math.floor(card.clientHeight - header - pad - 2));
+  sc.style.height = h + 'px';
+  return h;
+}
+// Re-measure once the page layout has settled and redraw if the card height changed.
+function _refitSalesChart() {
+  const sc = document.getElementById('salesChart');
+  if (!sc || !sc.offsetParent) return;
+  const before = sc.clientHeight;
+  const h = _fitSalesChartHeight(sc);
+  if (Math.abs(h - before) > 2) _drawSalesBubble();
+}
+let _salesFitBound = false;
+function _bindSalesChartFit() {
+  if (_salesFitBound) return;
+  _salesFitBound = true;
+  let t = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      const sc = document.getElementById('salesChart');
+      if (!sc || !sc.offsetParent) return;
+      _fitSalesChartHeight(sc);
+      _drawSalesBubble();
+    }, 120);
+  });
+  // Also follow the box itself (sidebar collapse, split view, zoom): redraw when its size really changes.
+  if (typeof ResizeObserver !== 'undefined') {
+    const sc = document.getElementById('salesChart');
+    if (sc) {
+      let raf = 0;
+      new ResizeObserver(() => {
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(() => {
+          if (!sc.offsetParent) return;
+          if (Math.abs(sc.clientWidth - _salesBubbleState.w) > 1 || Math.abs(sc.clientHeight - _salesBubbleState.h) > 1) _drawSalesBubble();
+        });
+      }).observe(sc);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// SALES OVERVIEW — Week / Month switch. Same CanvasJS bubble chart as before;
+// the two buttons in the card header (Week = 7 days, Month = 30 days) re-draw it
+// for that range and the subtitle follows. Bound from here, so index.html needs
+// no change.
+// ═══════════════════════════════════════════════════════
+// Week / Month buttons are switched OFF for now (the buttons stay as they were,
+// the chart always shows the last 7 days). To enable them later, set this to true.
+const SALES_RANGE_TOGGLE_ENABLED = false;
+let _salesOvDays = 7;
+let _salesOvBound = false;
+function _syncSalesOverviewUi() {
+  const sc = document.getElementById('salesChart');
+  const card = sc && sc.closest('.card');
+  if (!card) return;
+  const sub = card.querySelector('.card-subtitle');
+  if (sub) sub.textContent = `Last ${_salesOvDays} days`;
+  const btns = card.querySelectorAll('.card-header button');
+  [[btns[0], 7], [btns[1], 30]].forEach(([btn, d]) => {
+    if (!btn) return;
+    btn.classList.toggle('btn-accent', _salesOvDays === d);
+    btn.classList.toggle('btn-ghost', _salesOvDays !== d);
+  });
+}
+function _bindSalesOverviewButtons() {
+  if (_salesOvBound) return;
+  const sc = document.getElementById('salesChart');
+  const card = sc && sc.closest('.card');
+  const btns = card ? card.querySelectorAll('.card-header button') : [];
+  if (btns.length < 2) return;
+  _salesOvBound = true;
+  btns[0].addEventListener('click', () => loadSalesOverview(7).catch(e => console.error('Sales overview:', e)));
+  btns[1].addEventListener('click', () => loadSalesOverview(30).catch(e => console.error('Sales overview:', e)));
+}
+async function loadSalesOverview(days) {
+  _salesOvDays = (SALES_RANGE_TOGGLE_ENABLED && days === 30) ? 30 : 7;
+  days = _salesOvDays;
+  if (SALES_RANGE_TOGGLE_ENABLED) {
+    _bindSalesOverviewButtons();
+    _syncSalesOverviewUi();
+  }
+  if (charts.sales && typeof charts.sales.destroy === 'function') { try { charts.sales.destroy(); } catch (e) {} }
+  charts.sales = null;
+  // Sales chart — real daily totals for the last 7 (Week) or 30 (Month) days, as a bubble chart:
+  // x = day, y = revenue, bubble size = number of orders that day, so a
+  // day with fewer but bigger orders looks different from a day with lots
+  // of small ones, instead of both just being "a bar this tall".
+  const sc = document.getElementById('salesChart');
+  if (sc) {
+    try {
+      const chartData = await DashboardAPI.salesChart(days);
+      _fitSalesChartHeight(sc);
+      _bindSalesChartFit();
+      _salesBubbleState = { series: chartData.series || [], days, w: 0, h: 0 };
+      _drawSalesBubble();
+      setTimeout(_refitSalesChart, 300);
+    } catch (e) { sc.innerHTML = ''; console.error('Sales overview:', e); }
+  }
+}
+
+async function renderCharts(summary) {
+  // Category breakdown — product count per category (catalog composition, not
+  // sales), drawn as a polar-area donut with side call-outs. Plain SVG + HTML,
+  // so it needs no chart library and follows the light/dark theme through CSS.
+  if (charts.cat && typeof charts.cat.destroy === 'function') { try { charts.cat.destroy(); } catch (e) {} }
+  charts.cat = null;
+  const cc = document.getElementById('categoryChart');
+  if (cc) {
+    const prodData = await ProductsAPI.list({ page_size: 500 });
+    const products = prodData.results || prodData;
+    const catCounts = {};
+    products.forEach(p => { const k = p.category_name || 'Uncategorized'; catCounts[k] = (catCounts[k] || 0) + 1; });
+    renderCategoryPolarPie(cc, catCounts);
+  }
+
+  // Sales chart goes LAST: the card height is set by the taller Category card,
+  // so the chart can only be sized to fill it once that card has rendered.
+  try { await loadSalesOverview(_salesOvDays); } catch (e) { console.error('Sales overview:', e); }
+}
+
+// ═══════════════════════════════════════════════════════
+// CATEGORY POLAR-AREA DONUT
+// Equal-angle slices whose LENGTH (radius) is the category's share, around a
+// dark ring and light core that shows the total. Up to 4 slices: the top 3
+// categories + "Others" when there are more. Each slice gets a call-out (icon,
+// name, count) tied to it with a leader line. All sizes live in one 620x440
+// viewBox, and the call-outs are positioned in % of it, so it scales as one piece.
+// ═══════════════════════════════════════════════════════
+function renderCategoryPolarPie(host, catCounts) {
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const W = 620, H = 440, CX = 310, CY = 220;
+  const R_RING = 60, R_CORE = 44, R_MAX = 142;
+
+  let entries = Object.entries(catCounts).filter(([, n]) => n > 0).sort((x, y) => y[1] - x[1]);
+  const total = entries.reduce((s, [, n]) => s + n, 0);
+  if (!total) {
+    host.innerHTML = '<div class="rpie-empty"><i class="fa fa-chart-pie"></i><span>No products yet — add products to see the category breakdown</span></div>';
+    return;
+  }
+  if (entries.length > 4) {
+    const rest = entries.slice(3).reduce((s, [, n]) => s + n, 0);
+    entries = entries.slice(0, 3).concat([['Others', rest]]);
+  }
+  const N = entries.length;
+  const maxCount = Math.max(...entries.map(e => e[1]));
+  const span = 360 / N;
+
+  // Fixed colours per slot (crimson, coral-orange, amber, plum) + icon per slot.
+  const SLOTS = [
+    { cls: 'c0', icon: 'fa-boxes-stacked', pct: '#fff' },
+    { cls: 'c1', icon: 'fa-tags',          pct: '#fff' },
+    { cls: 'c2', icon: 'fa-layer-group',   pct: '#5c2247' },
+    { cls: 'c3', icon: 'fa-ellipsis',      pct: '#fff' },
+  ];
+  // Corners: angle of each (clockwise from 12 o'clock), and which side/half.
+  const CORNERS = [
+    { ang: 45,  sx: 1,  sy: -1 }, { ang: 135, sx: 1,  sy: 1 },
+    { ang: 225, sx: -1, sy: 1 },  { ang: 315, sx: -1, sy: -1 },
+  ];
+  const rad = d => d * Math.PI / 180;
+  const pt = (r, ang) => [CX + r * Math.sin(rad(ang)), CY - r * Math.cos(rad(ang))];
+  const angDist = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+
+  // Assign each slice the nearest free corner for its call-out.
+  const free = CORNERS.slice();
+  const slices = entries.map(([name, count], i) => {
+    const a0 = i * span, a1 = (i + 1) * span, mid = (a0 + a1) / 2;
+    const share = count / total;
+    const r1 = R_RING + (R_MAX - R_RING) * (0.32 + 0.68 * (count / maxCount));
+    let bi = 0;
+    free.forEach((c, k) => { if (angDist(c.ang, mid) < angDist(free[bi].ang, mid)) bi = k; });
+    const corner = free.splice(bi, 1)[0];
+    return { name, count, share, a0, a1, mid, r1, corner, slot: SLOTS[i % SLOTS.length], i };
+  });
+
+  const sector = (r0, r1, a0, a1) => {
+    const full = a1 - a0 >= 359.99;
+    if (full) {
+      const [x0, y0] = pt(r1, 0), [x1, y1] = pt(r1, 180), [ix0, iy0] = pt(r0, 0), [ix1, iy1] = pt(r0, 180);
+      return `M${x0},${y0} A${r1},${r1} 0 1 1 ${x1},${y1} A${r1},${r1} 0 1 1 ${x0},${y0} Z M${ix0},${iy0} A${r0},${r0} 0 1 0 ${ix1},${iy1} A${r0},${r0} 0 1 0 ${ix0},${iy0} Z`;
+    }
+    const large = (a1 - a0) > 180 ? 1 : 0;
+    const [ox0, oy0] = pt(r1, a0), [ox1, oy1] = pt(r1, a1), [ix1, iy1] = pt(r0, a1), [ix0, iy0] = pt(r0, a0);
+    return `M${ox0},${oy0} A${r1},${r1} 0 ${large} 1 ${ox1},${oy1} L${ix1},${iy1} A${r0},${r0} 0 ${large} 0 ${ix0},${iy0} Z`;
+  };
+  const pctText = s => { const v = s * 100; return v > 0 && v < 1 ? '<1%' : Math.round(v) + '%'; };
+  const fmt = n => Number(n).toLocaleString('en-US');
+
+  let svg = `<svg class="rpie-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Products by category">`;
+  svg += `<defs><filter id="rpieShadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="6" stdDeviation="7" flood-color="#000" flood-opacity=".22"/></filter></defs>`;
+
+  // slices (+ % label inside each)
+  slices.forEach(s => {
+    const [tx, ty] = pt(R_RING + (s.r1 - R_RING) * 0.42, s.mid);
+    const fs = Math.max(10.5, Math.min(22, (s.r1 - R_RING) * 0.3));
+    const [ox, oy] = pt(7, s.mid);                        // hover pop-out direction
+    svg += `<g class="rpie-slice ${s.slot.cls}" data-i="${s.i}" style="--i:${s.i};--dx:${(ox - CX).toFixed(1)}px;--dy:${(oy - CY).toFixed(1)}px">
+      <path class="rpie-shape" d="${sector(R_RING, s.r1, s.a0, s.a1)}" fill-rule="evenodd"/>
+      <text class="rpie-pct" x="${tx.toFixed(1)}" y="${ty.toFixed(1)}" fill="${s.slot.pct}" font-size="${fs.toFixed(1)}" text-anchor="middle" dominant-baseline="central">${pctText(s.share)}</text>
+    </g>`;
+  });
+
+  // ring + core
+  svg += `<circle class="rpie-ring" cx="${CX}" cy="${CY}" r="${R_RING}" filter="url(#rpieShadow)"/>
+          <circle class="rpie-core" cx="${CX}" cy="${CY}" r="${R_CORE}"/>
+          <text class="rpie-total" x="${CX}" y="${CY - 3}" text-anchor="middle" dominant-baseline="central">${esc(fmt(total))}</text>
+          <text class="rpie-total-lbl" x="${CX}" y="${CY + 15}" text-anchor="middle" dominant-baseline="central">PRODUCTS</text>`;
+
+  // leader lines: dot inside the slice -> 45° knee -> horizontal to the call-out icon
+  const AX = 162;                                    // call-out inner edge, distance from centre
+  slices.forEach(s => {
+    const c = s.corner;
+    const ly = CY + c.sy * (R_MAX + 8);              // just beyond the longest possible slice: the horizontal run never crosses one
+    let dAng = s.mid + Math.max(-1, Math.min(1, (((c.ang - s.mid + 540) % 360) - 180) / 90)) * Math.min(span * 0.28, 28);
+    dAng = Math.max(s.a0 + 6, Math.min(s.a1 - 6, dAng));
+    const [px, py] = pt(Math.max(R_RING + 16, s.r1 - 9), dAng);
+    const ax = CX + c.sx * AX;
+    let kx = px + c.sx * Math.abs(ly - py);
+    if (c.sx * (ax - kx) < 12) kx = ax - c.sx * 12;
+    s.lead = { ly, ax, px, py };
+    svg += `<g class="rpie-lead ${s.slot.cls}" style="--i:${s.i}">
+      <polyline pathLength="1" points="${px.toFixed(1)},${py.toFixed(1)} ${kx.toFixed(1)},${ly.toFixed(1)} ${ax.toFixed(1)},${ly.toFixed(1)}"/>
+      <circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="4"/>
+    </g>`;
+  });
+  svg += '</svg>';
+
+  // call-outs (HTML, positioned in % of the viewBox so text stays crisp)
+  let co = '';
+  slices.forEach(s => {
+    const c = s.corner, { ly, ax } = s.lead;
+    const w = 140, gap = 4;
+    const left = c.sx > 0 ? ax + gap : ax - gap - w;
+    co += `<div class="rpie-co ${s.slot.cls} ${c.sx > 0 ? 'r' : 'l'}" data-i="${s.i}" style="--i:${s.i};left:${(left / W * 100).toFixed(2)}%;top:${((ly - 13) / H * 100).toFixed(2)}%;width:${(w / W * 100).toFixed(2)}%">
+      <span class="rpie-ico"><i class="fa ${s.slot.icon}"></i></span>
+      <span class="rpie-txt">
+        <b class="rpie-name" title="${esc(s.name)}">${esc(s.name)}</b>
+        <span class="rpie-desc">${fmt(s.count)} product${s.count === 1 ? '' : 's'} · ${pctText(s.share)} of catalog</span>
+      </span>
+    </div>`;
+  });
+
+  host.innerHTML = `<div class="rpie">${svg}${co}<div class="rpie-tip" hidden></div></div>`;
+
+  // hover: pop the slice, dim the rest, show a tooltip; hovering a call-out does the same
+  const root = host.querySelector('.rpie'), tip = root.querySelector('.rpie-tip');
+  const setHover = i => {
+    root.classList.toggle('has-hover', i !== null);
+    root.querySelectorAll('[data-i]').forEach(el => el.classList.toggle('is-hover', String(i) === el.dataset.i));
+  };
+  root.addEventListener('mouseover', e => {
+    const t = e.target.closest('[data-i]'); if (!t) return;
+    const s = slices[+t.dataset.i]; setHover(s.i);
+    tip.innerHTML = `<b>${esc(s.name)}</b><br>${fmt(s.count)} of ${fmt(total)} products (${pctText(s.share)})`;
+    tip.hidden = false;
+  });
+  root.addEventListener('mousemove', e => {
+    if (tip.hidden) return;
+    const r = root.getBoundingClientRect();
+    tip.style.left = Math.min(e.clientX - r.left + 14, r.width - tip.offsetWidth - 4) + 'px';
+    tip.style.top  = Math.max(e.clientY - r.top - tip.offsetHeight - 10, 2) + 'px';
+  });
+  root.addEventListener('mouseout', e => {
+    if (e.relatedTarget && root.contains(e.relatedTarget) && e.relatedTarget.closest && e.relatedTarget.closest('[data-i]')) return;
+    setHover(null); tip.hidden = true;
+  });
+}
+
+// ═══════════════════════════════════════════════════════
+// POS
+// ═══════════════════════════════════════════════════════
+function initPOS() {
+  document.getElementById('pos-date').textContent = new Date().toLocaleDateString('en-US',{weekday:'short',year:'numeric',month:'short',day:'numeric'});
+  document.getElementById('pos-invoice').textContent = _posEditSaleId ? _posEditInvoice : 'INV-' + String(invoiceCounter).padStart(4,'0');
+  populatePosCategories();
+  renderPosProducts();
+  updateCartUI();
+}
+
+let _posProductCache = [];
+let _posStockByProduct = {};
+
+async function _loadPosProducts() {
+  const [prodData, stockData] = await Promise.all([
+    ProductsAPI.list({ page_size: 500 }),  // status filter removed — was silently hiding products whose status wasn't exactly 'active'
+    InventoryAPI.stockItems({ page_size: 1000 }),
+  ]);
+  _posProductCache = prodData.results || prodData;
+  _posStockByProduct = {};
+  (stockData.results || stockData).forEach(si => {
+    _posStockByProduct[si.product] = (_posStockByProduct[si.product] || 0) + si.quantity;
+  });
+}
+
+async function populatePosCategories() {
+  const data = await CategoriesAPI.list();
+  const cats = data.results || data;
+  const sel = document.getElementById('pos-category');
+  sel.innerHTML = '<option value="">All Categories</option>' + cats.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+}
+
+function filterPosProducts() { renderPosProducts(); }
+
+async function renderPosProducts() {
+  if (!_posProductCache.length) await _loadPosProducts();
+  const q = (document.getElementById('pos-search').value || '').toLowerCase();
+  const cat = document.getElementById('pos-category').value;
+  const grid = document.getElementById('pos-product-grid');
+  const prods = _posProductCache.filter(p =>
+    (p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.barcode||'').includes(q)) &&
+    (!cat || String(p.category) === String(cat))
+  );
+  grid.innerHTML = prods.map(p => {
+    const stock = _posStockByProduct[p.id] || 0;
+    return `
+    <div class="pos-product-card" onclick="addToCart(${p.id})" ${stock===0?'style="opacity:.4;cursor:not-allowed"':''}>
+      <div class="pos-prod-icon">📦</div>
+      <div class="pos-prod-name">${p.name}</div>
+      <div class="pos-prod-price">Rs.${Number(p.final_price).toFixed(2)}</div>
+      <div class="pos-prod-stock ${stock<=5?'text-red':''}">${stock>0?'In stock: '+stock:'Out of stock'}</div>
+    </div>`;
+  }).join('');
+}
+
+function addToCart(pid) {
+  const prod = _posProductCache.find(p => p.id === pid);
+  const stock = _posStockByProduct[pid] || 0;
+  if (!prod || stock === 0) { toast('Product out of stock!', 'error'); return; }
+  const existing = cart.find(c => c.id === pid);
+  if (existing) {
+    if (existing.qty >= stock) { toast('Insufficient stock!', 'warning'); return; }
+    existing.qty++;
+  } else {
+    cart.push({ id: pid, name: prod.name, price: Number(prod.selling_price)||0, qty: 1, icon: '📦', taxRate: Number(prod.tax_rate)||0, barcode: prod.barcode || '' });
+  }
+  updateCartUI();
+}
+
+function removeFromCart(pid) {
+  cart = cart.filter(c => c.id !== pid);
+  updateCartUI();
+}
+
+function changeQty(pid, delta) {
+  const item = cart.find(c => c.id === pid);
+  const stock = _posStockByProduct[pid] || 0;
+  if (!item) return;
+  item.qty += delta;
+  if (item.qty <= 0) { cart = cart.filter(c => c.id !== pid); }
+  else if (item.qty > stock) { item.qty = stock; toast('Max stock reached','warning'); }
+  updateCartUI();
+}
+
+function updateCartUI() {
+  const container = document.getElementById('cart-items');
+  const discount = parseFloat(document.getElementById('cart-discount').value)||0;
+
+  if (cart.length === 0) {
+    container.innerHTML = `<div class="cart-empty"><i class="fa fa-shopping-cart"></i><div style="font-size:13px;font-weight:600">Cart is empty</div><div style="font-size:12px">Click products to add</div></div>`;
+  } else {
+    // Receipt-style table: SI + Product name (with its Barcode on the line
+    // below, matching a real thermal invoice), Qty, Rate, Disc, Amount.
+    // This is a display-only layout change — the actual subtotal/discount/
+    // tax/total math below is untouched. Disc always shows 0.00 here since
+    // POS doesn't apply a per-line discount (only the single Discount %
+    // field for the whole cart, in the totals panel below).
+    const rows = cart.map((item, idx) => `
+      <div class="cart-table-row">
+        <div class="ctc-si">${idx + 1}</div>
+        <div class="ctc-product">
+          <div class="ctc-product-name">${item.name}</div>
+          <div class="ctc-barcode">${item.barcode || '—'}</div>
+        </div>
+        <div class="ctc-qty">
+          <div class="cart-qty-mini">
+            <button class="qty-btn-mini" onclick="changeQty(${item.id},-1)">−</button>
+            <span class="qty-val-mini">${item.qty}</span>
+            <button class="qty-btn-mini" onclick="changeQty(${item.id},1)">+</button>
+          </div>
+        </div>
+        <div class="ctc-rate">${item.price.toFixed(2)}</div>
+        <div class="ctc-disc">0.00</div>
+        <div class="ctc-amount">${(item.price*item.qty).toFixed(2)}</div>
+        <div class="ctc-action"><span class="cart-remove-mini" onclick="removeFromCart(${item.id})" title="Remove">✕</span></div>
+      </div>`).join('');
+
+    container.innerHTML = `
+      <div class="cart-table">
+        <div class="cart-table-header">
+          <div class="ctc-si">SI</div>
+          <div class="ctc-product">Product</div>
+          <div class="ctc-qty">Qty</div>
+          <div class="ctc-rate">Rate</div>
+          <div class="ctc-disc">Disc.</div>
+          <div class="ctc-amount">Amount</div>
+          <div class="ctc-action"></div>
+        </div>
+        ${rows}
+      </div>`;
+  }
+
+  const subtotal = cart.reduce((a,i) => a + i.price*i.qty, 0);
+  const discountAmt = subtotal * discount / 100;
+  // Tax is computed per line item from each product's own configured tax
+  // rate — NOT a single flat percentage applied to the whole cart, so a
+  // product set to 18% is actually charged at 18%, regardless of what any
+  // other product in the same cart is taxed at. This mirrors exactly how
+  // the backend computes it: tax on each line's full amount, with the
+  // manual cart-level discount subtracted separately afterward.
+  const taxAmt = cart.reduce((a,i) => a + (i.price*i.qty) * (i.taxRate||0)/100, 0);
+  const total = subtotal - discountAmt + taxAmt;
+
+  document.getElementById('cart-count').textContent = cart.reduce((a,i)=>a+i.qty,0);
+  document.getElementById('cart-subtotal').textContent = 'Rs.' + subtotal.toFixed(2);
+  document.getElementById('cart-discount-val').textContent = '-Rs.' + discountAmt.toFixed(2);
+  document.getElementById('cart-tax-val').textContent = '+Rs.' + taxAmt.toFixed(2);
+  document.getElementById('cart-total').textContent = 'Rs.' + total.toFixed(2);
+
+  const cash = parseFloat(document.getElementById('cash-received').value)||0;
+  document.getElementById('change-amt').textContent = 'Rs.' + Math.max(0, cash - total).toFixed(2);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  ['cart-discount','cash-received'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateCartUI);
+  });
+});
+
+function selectPayment(el, method) {
+  document.querySelectorAll('.payment-method').forEach(e => e.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedPayment = method;
+}
+
+async function clearCart() {
+  if (cart.length === 0) return;
+  if (await confirmModal('All items in the current cart will be removed.', { title: 'Clear Cart?', confirmText: 'Clear Cart', icon: 'fa-broom' })) { cart = []; updateCartUI(); }
+}
+
+async function updatePosCustomers() {
+  const sel = document.getElementById('pos-customer');
+  if (!sel) return;
+  const data = await CustomersAPI.list({ page_size: 500 });
+  const customers = data.results || data;
+  sel.innerHTML = '<option value="">Walk-in Customer</option>' + customers.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+}
+
+const _posPaymentMethodMap = { cash: 'cash', card: 'card', digital: 'mobile_wallet' };
+
+async function processPayment() {
+  if (cart.length === 0) { toast('Cart is empty!', 'error'); return; }
+  const discount = parseFloat(document.getElementById('cart-discount').value)||0;
+  const subtotal = cart.reduce((a,i) => a+i.price*i.qty, 0);
+  const discountAmt = Math.round(subtotal * discount / 100 * 100) / 100;
+  const taxAmt = cart.reduce((a,i) => a + (i.price*i.qty) * (i.taxRate||0)/100, 0);
+  const total = subtotal - discountAmt + taxAmt;
+
+  if (selectedPayment === 'cash') {
+    const cash = parseFloat(document.getElementById('cash-received').value)||0;
+    // While editing an existing bill the cash box may be left empty — the bill is simply re-collected at the new total.
+    const cashBoxEmpty = document.getElementById('cash-received').value === '';
+    if (cash < total && !(_posEditSaleId && cashBoxEmpty)) { toast('Insufficient cash received!', 'error'); return; }
+  }
+
+  if (total <= 0) {
+    toast('Total is Rs.0.00 — check that the items in the cart have a price set before charging.', 'error');
+    return;
+  }
+
+  const custId = document.getElementById('pos-customer').value;
+  const payBtn = document.querySelector('.btn-checkout, #checkout-btn') || null;
+  if (payBtn) payBtn.disabled = true;
+
+  try {
+    const warehouseId = await _ensureDefaultWarehouse();
+    const items = cart.map(i => ({
+      product: i.id,
+      quantity: i.qty,
+      unit_price: i.price,
+      tax_percent: i.taxRate||0,
+    }));
+
+    const salePayload = {
+      warehouse: warehouseId,
+      customer: custId ? parseInt(custId) : null,
+      items,
+      discount_amount: discountAmt,
+      notes: 'POS Terminal',   // marks this as a counter sale → always prints on the 73mm slip
+    };
+    const editingId = _posEditSaleId;   // set when a bill from POS Bills is being edited
+    let sale;
+    if (editingId) {
+      // Same invoice number, same row — the backend reverses the old items and applies the new ones.
+      sale = await SalesAPI.edit(editingId, salePayload);
+      if (sale.edit_unchanged) {
+        toast('No changes made — the bill was kept exactly as it is.', 'success');
+        cart = []; document.getElementById('cart-discount').value = 0; document.getElementById('cash-received').value = '';
+        await posExitEdit();
+        return;
+      }
+    } else {
+      sale = await SalesAPI.create(salePayload);
+    }
+    _slipsLoaded = false; // new sale — Sale Slips list must refetch next time it's opened
+    _pbLoaded = false;    // …and so must the POS Bills list
+
+    // Record the payment immediately (this UI is a cash-register checkout,
+    // not a credit-sale flow) so the invoice shows as PAID.
+    await SalesAPI.pay(sale.id, {
+      amount: sale.total_amount,
+      method: _posPaymentMethodMap[selectedPayment] || 'other',
+    });
+    if (editingId) sale = await SalesAPI.get(sale.id);   // fresh copy with the new payment, for the receipt
+
+    _lastOrder = sale;
+    showReceipt(sale);
+    cart = [];
+    document.getElementById('cart-discount').value = 0;
+    document.getElementById('cash-received').value = '';
+    updateCartUI();
+    renderPosProducts();      // refresh stock levels shown in the grid
+    if (editingId) await posExitEdit();
+    toast(editingId ? `Bill updated! Invoice ${sale.invoice_number}` : `Payment processed! Invoice ${sale.invoice_number}`, 'success');
+  } catch (err) {
+    toast(err.message || 'Failed to process payment', 'error');
+  } finally {
+    if (payBtn) payBtn.disabled = false;
+  }
+}
+
+// Builds the receipt's inner content (header, items, totals, foot note) as
+// a plain HTML string — shared by the on-screen preview (showReceipt) and
+// the actual thermal print (printPosReceipt), so both always show the same
+// invoice. Each item's name gets its own line and wraps naturally if long
+// (see .rcp-item-name in CSS) instead of squeezing into one row and
+// overlapping the price — that's what was making long product names look
+// messy on the thermal printout.
+// Product table for the counter-sale slip: Sr. | Product | Price | Qty | Disc | Total,
+// closed by a "Gross Total" row (total qty, total discount, total amount) — the
+// same layout as a classic POS slip. The product name sits in its own column and
+// wraps inside it, so long names never run into the numbers. "Total" is the line
+// amount before tax (price x qty - line discount); tax and any bill-level
+// discount are still itemised in the totals block underneath.
+function _buildReceiptItemsTable(sale) {
+  const money = v => Number(v || 0).toFixed(2);
+  const rows = (sale.items || []).map(i => {
+    const qty = Number(i.quantity) || 0;
+    const sub = i.line_subtotal != null ? Number(i.line_subtotal) : qty * Number(i.unit_price || 0);
+    const disc = Number(i.line_discount) || 0;
+    const tot = sub - disc;
+    return `<tr>
+      <td class="c-prod">${_p3Esc(i.product_name || '')}</td>
+      <td class="c-num">${money(i.unit_price)}</td>
+      <td class="c-num c-qty">${qty}</td>
+      <td class="c-num">${money(tot)}</td>
+    </tr>`;
+  }).join('');
+  return `<table class="rcp-table">
+    <colgroup><col style="width:44%"><col style="width:21%"><col style="width:9%"><col style="width:26%"></colgroup>
+    <thead><tr><th class="c-prod">Product</th><th class="c-num">Price</th><th class="c-num">Qty</th><th class="c-num">Total</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function _buildReceiptContentHtml(sale, opts) {
+  // reprint = printing an older bill from Sale Slips etc.: nothing may be read
+  // from the live POS screen (cash-received box, bill-name box, selected payment).
+  const reprint = !!(opts && opts.reprint);
+  const cashReceived = reprint ? Number(sale.total_amount) : (parseFloat(document.getElementById('cash-received')?.value) || Number(sale.total_amount));
+  const change = Math.max(0, cashReceived - Number(sale.total_amount));
+  const paymentMethod = String((sale.payments && sale.payments[0]) ? sale.payments[0].method : (reprint ? (sale.payment_status || 'unpaid') : selectedPayment));
+  const s = (typeof _companySettingsCache !== 'undefined' && _companySettingsCache) || {};
+  const storeName = s.company_name || 'SmartRetail Store';
+  const storeAddress = s.address || '';
+  const storePhone = s.phone || '';
+  const storeEmail = s.email || '';
+  const headerNote = s.invoice_header_note || 'Thank you for shopping with us!';
+  const footerNote = s.invoice_footer_note || 'All sales are final. Visit us again!';
+  const billName = reprint ? '' : document.getElementById('bill-customer-name')?.value?.trim();
+  const billContact = reprint ? '' : document.getElementById('bill-customer-contact')?.value?.trim();
+  const cashierName = reprint ? (sale.served_by_name || '—') : (currentUser.full_name || currentUser.email);
+
+  return `<div class="rcp-wm-wrap"><div class="rcp-watermark">${storeName}</div><div class="rcp-wm-content">
+    ${s.logo ? `<div class="rcp-center"><img class="rcp-logo" src="${s.logo}" alt=""></div>` : ''}
+    <div class="rcp-center" style="font-size:16px;font-weight:700">${storeName}</div>
+    ${storeAddress ? `<div class="rcp-center" style="font-size:11px">${storeAddress}</div>` : ''}
+    ${storePhone   ? `<div class="rcp-center" style="font-size:11px">Tel: ${storePhone}</div>` : ''}
+    ${storeEmail   ? `<div class="rcp-center" style="font-size:11px">${storeEmail}</div>` : ''}
+    <div class="rcp-line"></div>
+    <div class="rcp-row"><span>Invoice:</span><span>${sale.invoice_number}</span></div>
+    <div class="rcp-row"><span>Date:</span><span>${(sale.created_at||'').replace('T',' ').slice(0,19)}</span></div>
+    <div class="rcp-row"><span>Customer:</span><span>${billName || sale.customer_name || 'Walk-in'}</span></div>
+    ${billContact ? `<div class="rcp-row"><span>Contact:</span><span>${billContact}</span></div>` : ''}
+    <div class="rcp-row"><span>Cashier:</span><span>${cashierName}</span></div>
+    <div class="rcp-line"></div>
+    ${_buildReceiptItemsTable(sale)}
+    <div class="rcp-line"></div>
+    <div class="rcp-row"><span>Subtotal:</span><span>Rs.${Number(sale.subtotal).toFixed(2)}</span></div>
+    ${Number(sale.discount_amount)>0?`<div class="rcp-row"><span>Discount:</span><span>-Rs.${Number(sale.discount_amount).toFixed(2)}</span></div>`:''}
+    <div class="rcp-row"><span>Tax:</span><span>+Rs.${Number(sale.tax_amount).toFixed(2)}</span></div>
+    <div class="rcp-line"></div>
+    <div class="rcp-row" style="font-size:14px;font-weight:700"><span>TOTAL:</span><span>Rs.${Number(sale.total_amount).toFixed(2)}</span></div>
+    <div class="rcp-row"><span>Payment:</span><span>${paymentMethod.toUpperCase()}</span></div>
+    ${(paymentMethod==='cash' && !reprint)?`<div class="rcp-row"><span>Cash Received:</span><span>Rs.${cashReceived.toFixed(2)}</span></div><div class="rcp-row"><span>Change:</span><span>Rs.${change.toFixed(2)}</span></div>`:''}
+    <div class="rcp-line"></div>
+    <div class="rcp-center" style="font-size:11px">${headerNote}</div>
+    <div class="rcp-center" style="font-size:10px;margin-top:4px">${footerNote}</div>
+    <div class="rcp-center" style="font-size:10px;margin-top:4px">|||||||||||||||||||||||||||</div>
+    <div class="rcp-center" style="font-family:var(--mono);font-size:10px">${sale.invoice_number}</div>
+  </div></div>`;
+}
+
+function showReceipt(sale) {
+  document.getElementById('receipt-body').innerHTML = `<div class="receipt-preview">${_buildReceiptContentHtml(sale)}</div>`;
+  openModal('receipt-modal');
+  const billName = document.getElementById('bill-customer-name');
+  const billContact = document.getElementById('bill-customer-contact');
+  if (billName && !billName.value) billName.value = (sale.customer_name) || '';
+  if (billContact) billContact.value = '';
+}
+
+// POS Terminal — thermal receipt print only (A4 invoice printing has been
+// removed from the POS receipt modal; A4 is still available elsewhere,
+// e.g. Sale Slips / Order Booking). Builds the receipt into #print-area —
+// the modal itself sits outside #print-area and the app's print CSS hides
+// everything except #print-area while printing, so routing through here
+// (like every other print button in the app) is what actually gets it onto
+// the page instead of a blank printout.
+function printPosReceipt() {
+  if (!_lastOrder) { toast('No receipt to print yet!', 'error'); return; }
+  printThermalSlip(_lastOrder, { reprint: false });
+}
+
+// A bill made from the POS Terminal (walk-in counter sale) always prints on the
+// 73mm slip — right after checkout AND whenever it is printed again later
+// (Sale Slips list, slip details…). Bills with the "POS Terminal" note are POS
+// bills; older POS bills were saved with empty notes, while every Order Booking
+// bill carries an "Order Booking …" note, so an empty note also means POS.
+function _isPosTerminalSale(sale) {
+  const n = String((sale && sale.notes) || '').trim();
+  return n === '' || /^POS Terminal/i.test(n);
+}
+
+async function printThermalSlip(sale, opts) {
+  const printArea = document.getElementById('print-area');
+  printArea.innerHTML = `<div class="thermal-receipt">${_buildReceiptContentHtml(sale, opts)}</div>`;
+  printArea.style.display = 'block';
+  // The business logo must be loaded before the print dialog opens, or it prints as an empty gap.
+  const imgs = Array.from(printArea.querySelectorAll('img'));
+  if (imgs.length) {
+    await Promise.race([
+      Promise.all(imgs.map(im => (im.complete ? 1 : new Promise(r => { im.onload = im.onerror = r; })))),
+      new Promise(r => setTimeout(r, 2000)),
+    ]);
+  }
+  window.print();
+  setTimeout(() => { printArea.style.display = 'none'; }, 1000);
+}
+
+
+// ═══════════════════════════════════════════════════════
+// POS TERMINAL → POS BILLS
+// Every bill made from the POS Terminal is listed here (and no longer in Sale
+// Slips). View, print, edit, cancel and return all happen from this page:
+//   • Edit   → the bill's items are loaded back into the POS Terminal; saving
+//              keeps the SAME invoice number (marked "Edited") and re-collects
+//              the payment at the new total.
+//   • Cancel → full return (stock + customer balance restored).
+//   • Return → pick the items / quantities to take back (partial return).
+// ═══════════════════════════════════════════════════════
+let _pbCache = [];
+let _pbLoaded = false;
+let _pbReturnSaleId = null;
+let _posEditSaleId = null;     // id of the POS bill currently loaded in the terminal for editing
+let _posEditInvoice = '';
+
+const _PB_ACTIVE = ['completed', 'edited', 'partially_returned'];   // statuses that can still be edited / cancelled / returned
+
+// Sidebar group (POS Terminal ▸ Billing Terminal / POS Bills)
+function posToggleGroup(force) {
+  const g = document.getElementById('pos-nav-group');
+  if (!g) return;
+  const open = typeof force === 'boolean' ? force : !g.classList.contains('open');
+  g.classList.toggle('open', open);
+  try { localStorage.setItem('pos_group_open', open ? '1' : '0'); } catch (_) { /* private mode */ }
+}
+document.addEventListener('DOMContentLoaded', () => {
+  let open = true;
+  try { open = localStorage.getItem('pos_group_open') !== '0'; } catch (_) { /* default open */ }
+  posToggleGroup(open);
+});
+
+function _pbEsc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function _pbStatusBadge(status) {
+  const map = {
+    completed:          ['badge-green',  'Completed'],
+    edited:             ['badge-blue',   'Edited'],
+    partially_returned: ['badge-yellow', 'Partially Returned'],
+    returned:           ['badge-red',    'Returned'],
+    cancelled:          ['badge-red',    'Cancelled'],
+  };
+  const [cls, label] = map[status] || ['badge-red', status || '—'];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+function _pbTodayLocal() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+async function renderPosBills(forceRefresh) {
+  const dateEl = document.getElementById('pb-date');
+  if (dateEl && dateEl.dataset.init !== '1') { dateEl.value = _pbTodayLocal(); dateEl.dataset.init = '1'; }   // opens on today's bills
+
+  if (!_pbLoaded || forceRefresh === true) {
+    try {
+      const data = await SalesAPI.list({ page_size: 500, ordering: '-created_at' });
+      _pbCache = (data.results || data).filter(b => _isPosTerminalSale(b) && b.status !== 'draft');
+      _pbLoaded = true;
+    } catch (err) {
+      toast(err.message || 'Failed to load POS bills', 'error');
+      return;
+    }
+  }
+
+  const dateFilter    = dateEl ? dateEl.value : '';
+  const statusFilter  = document.getElementById('pb-status')?.value || '';
+  const searchFilter  = (document.getElementById('pb-search')?.value || '').toLowerCase().trim();
+  const cashierFilter = (document.getElementById('pb-cashier')?.value || '').toLowerCase().trim();
+
+  const bills = _pbCache.filter(b =>
+    (!statusFilter  || (statusFilter === 'returned' ? ['returned', 'cancelled'].includes(b.status) : b.status === statusFilter)) &&
+    (!dateFilter    || (b.created_at || '').slice(0, 10) === dateFilter) &&
+    (!searchFilter  || (b.invoice_number || '').toLowerCase().includes(searchFilter) ||
+                       (b.customer_name || 'walk-in').toLowerCase().includes(searchFilter)) &&
+    (!cashierFilter || (b.served_by_name || '').toLowerCase().includes(cashierFilter))
+  );
+
+  const tbody = document.getElementById('pb-tbody');
+  const label = document.getElementById('pb-count-label');
+  if (!tbody) return;
+  const sum = bills.reduce((a, b) => a + (Number(b.total_amount) || 0), 0);
+  if (label) label.textContent = bills.length + ' bill' + (bills.length !== 1 ? 's' : '') + ' · Rs.' + sum.toFixed(2);
+
+  if (!bills.length) {
+    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:28px;color:var(--text-muted)">No POS bills found for these filters.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = bills.map(b => {
+    const active = _PB_ACTIVE.includes(b.status);
+    const method = (b.payments && b.payments[0] && b.payments[0].method) ? String(b.payments[0].method).replace(/_/g, ' ').toUpperCase() : '—';
+    const nItems = (b.items || []).length;
+    return `<tr>
+      <td class="td-mono fw-700" style="color:var(--cyan)">${_pbEsc(b.invoice_number)}</td>
+      <td>${_pbEsc((b.created_at || '').replace('T', ' ').slice(0, 16))}</td>
+      <td>${_pbEsc(b.customer_name || 'Walk-in')}</td>
+      <td>${_pbEsc(b.served_by_name || '—')}</td>
+      <td>${nItems} item${nItems !== 1 ? 's' : ''}</td>
+      <td class="fw-700">Rs.${Number(b.total_amount).toFixed(2)}</td>
+      <td>${method}</td>
+      <td>${_pbStatusBadge(b.status)}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" title="View details" onclick="pbView(${b.id})"><i class="fa fa-eye"></i></button>
+        <button class="btn btn-ghost btn-sm" title="Print slip (73mm)" onclick="pbPrint(${b.id})"><i class="fa fa-print"></i></button>
+        ${active ? `
+        <button class="btn btn-ghost btn-sm" title="Edit bill" onclick="pbEdit(${b.id})"><i class="fa fa-pen"></i></button>
+        <button class="btn btn-ghost btn-sm" title="Return items" onclick="pbOpenReturn(${b.id})"><i class="fa fa-undo"></i></button>
+        <button class="btn btn-red btn-sm" title="Cancel bill (full return)" onclick="pbCancel(${b.id})"><i class="fa fa-ban"></i></button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function clearPosBillsFilters() {
+  const ids = ['pb-date', 'pb-status', 'pb-search', 'pb-cashier'];
+  ids.forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  renderPosBills();
+}
+
+function _pbFind(id) { return _pbCache.find(x => x.id === id); }
+
+function pbView(id) {
+  const b = _pbFind(id);
+  if (!b) return;
+  const active = _PB_ACTIVE.includes(b.status);
+  const method = (b.payments && b.payments[0] && b.payments[0].method) ? String(b.payments[0].method).replace(/_/g, ' ').toUpperCase() : '—';
+  document.getElementById('od-title').textContent = 'POS Bill — ' + b.invoice_number;
+  document.getElementById('order-detail-body').innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">CUSTOMER</div><div style="font-weight:600">${_pbEsc(b.customer_name || 'Walk-in')}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">INVOICE</div><div style="font-weight:700;color:var(--cyan);font-family:var(--mono)">${_pbEsc(b.invoice_number)}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">DATE &amp; TIME</div><div style="font-weight:600">${_pbEsc((b.created_at || '').replace('T', ' ').slice(0, 16))}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">CASHIER</div><div style="font-weight:600">${_pbEsc(b.served_by_name || '—')}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">PAYMENT</div><div style="font-weight:600">${method}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">STATUS</div>${_pbStatusBadge(b.status)}</div>
+    </div>
+    <table>
+      <thead><tr><th>Product</th><th>Rate</th><th>Qty</th><th>Amount</th></tr></thead>
+      <tbody>${(b.items || []).filter(it => (it.quantity - Number(it.quantity_returned || 0)) > 0).map(it => {
+        const netQty = it.quantity - Number(it.quantity_returned || 0);
+        const netAmt = it.quantity ? Number(it.line_total) * (netQty / it.quantity) : 0;
+        return `<tr>
+          <td>📦 ${_pbEsc(it.product_name || '—')}${Number(it.quantity_returned) > 0 ? `<div style="font-size:10px;color:var(--red)">${it.quantity_returned} returned</div>` : ''}</td>
+          <td>Rs.${Number(it.unit_price).toFixed(2)}</td>
+          <td class="fw-700">${netQty}</td>
+          <td class="fw-700 text-green">Rs.${netAmt.toFixed(2)}</td>
+        </tr>`; }).join('')}</tbody>
+    </table>
+    <div style="margin-top:16px;text-align:right">
+      ${Number(b.discount_amount) > 0 ? `<div style="font-size:12px;color:var(--red);margin-bottom:4px">Discount: -Rs.${Number(b.discount_amount).toFixed(2)}</div>` : ''}
+      ${Number(b.tax_amount) > 0 ? `<div style="font-size:12px;color:var(--yellow);margin-bottom:4px">Tax: +Rs.${Number(b.tax_amount).toFixed(2)}</div>` : ''}
+      <div style="font-size:16px;font-weight:800;margin-bottom:6px">Bill Total: Rs.${Number(b.total_amount).toFixed(2)}</div>
+    </div>
+    ${['returned', 'partially_returned'].includes(b.status) ? `<div style="font-size:11px;color:var(--text-muted);text-align:right;margin-top:-4px">Bill Total already reflects the return.</div>` : ''}
+    <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;flex-wrap:wrap">
+      ${active ? `
+        <button class="btn btn-red btn-sm" onclick="closeModal('order-detail-modal');pbCancel(${b.id})"><i class="fa fa-ban"></i> Cancel Bill</button>
+        <button class="btn btn-ghost btn-sm" onclick="closeModal('order-detail-modal');pbOpenReturn(${b.id})"><i class="fa fa-undo"></i> Return Items</button>
+        <button class="btn btn-ghost btn-sm" onclick="closeModal('order-detail-modal');pbEdit(${b.id})"><i class="fa fa-pen"></i> Edit Bill</button>` : ''}
+      <button class="btn btn-accent btn-sm" onclick="pbPrint(${b.id})"><i class="fa fa-print"></i> Print Slip (73mm)</button>
+    </div>`;
+  openModal('order-detail-modal');
+}
+
+function pbPrint(id) {
+  const b = _pbFind(id);
+  if (!b) return;
+  printThermalSlip(b, { reprint: true });
+}
+
+// ── Cancel = full return of everything still on the bill ──
+async function pbCancel(id) {
+  if (!(await confirmModal('Stock and customer balance will be restored via a full return.', { title: 'Cancel POS Bill?', confirmText: 'Cancel Bill', icon: 'fa-ban' }))) return;
+  try {
+    const sale = await SalesAPI.get(id);
+    const items = (sale.items || [])
+      .filter(i => (i.quantity - Number(i.quantity_returned || 0)) > 0)
+      .map(i => ({ sale_item: i.id, quantity: i.quantity - Number(i.quantity_returned || 0) }));
+    if (!items.length) { toast('Nothing left to cancel — already fully returned.', 'warning'); return; }
+    await SalesAPI.processReturn(id, { items, reason: 'Cancelled from POS Bills' });
+    _pbLoaded = false; _slipsLoaded = false; _posProductCache = [];
+    await renderPosBills(true);
+    toast('POS bill cancelled — stock and balance restored', 'warning');
+  } catch (err) {
+    toast(err.message || 'Failed to cancel bill', 'error');
+  }
+}
+
+// ── Return = pick items / quantities (partial return) ──
+async function pbOpenReturn(id) {
+  try {
+    const sale = await SalesAPI.get(id);
+    const rows = (sale.items || [])
+      .map(i => ({ id: i.id, name: i.product_name, price: Number(i.unit_price), sold: i.quantity, returned: Number(i.quantity_returned || 0) }))
+      .filter(r => r.sold - r.returned > 0);
+    if (!rows.length) { toast('Nothing left to return — already fully returned.', 'warning'); return; }
+    _pbReturnSaleId = id;
+    document.getElementById('pb-return-title').textContent = 'Return Items — ' + sale.invoice_number;
+    document.getElementById('pb-return-body').innerHTML = `
+      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px">Enter how many of each item the customer is returning. Returned items go back into stock and the bill total is reduced.</div>
+      <table>
+        <thead><tr><th>Product</th><th>Rate</th><th>Sold</th><th>Already returned</th><th style="width:130px">Return Qty</th></tr></thead>
+        <tbody>${rows.map(r => `<tr>
+          <td>📦 ${_pbEsc(r.name || '—')}</td>
+          <td>Rs.${r.price.toFixed(2)}</td>
+          <td>${r.sold}</td>
+          <td>${r.returned}</td>
+          <td><input type="number" class="form-input pb-ret-qty" data-item="${r.id}" data-max="${r.sold - r.returned}" min="0" max="${r.sold - r.returned}" step="1" value="0" style="padding:6px 10px;width:110px"></td>
+        </tr>`).join('')}</tbody>
+      </table>`;
+    openModal('pb-return-modal');
+  } catch (err) {
+    toast(err.message || 'Failed to load the bill', 'error');
+  }
+}
+
+async function pbConfirmReturn() {
+  const inputs = Array.from(document.querySelectorAll('#pb-return-body .pb-ret-qty'));
+  const items = [];
+  for (const el of inputs) {
+    const qty = Number(el.value) || 0;
+    const max = Number(el.dataset.max) || 0;
+    if (qty < 0 || !Number.isInteger(qty)) { toast('Return quantity must be a whole number.', 'error'); return; }
+    if (qty > max) { toast(`Cannot return more than ${max} of an item (what is left on the bill).`, 'error'); return; }
+    if (qty > 0) items.push({ sale_item: Number(el.dataset.item), quantity: qty });
+  }
+  if (!items.length) { toast('Enter a return quantity for at least one item.', 'warning'); return; }
+  const btn = document.getElementById('pb-return-confirm');
+  if (btn) btn.disabled = true;
+  try {
+    await SalesAPI.processReturn(_pbReturnSaleId, { items, reason: 'Returned from POS Bills' });
+    closeModal('pb-return-modal');
+    _pbLoaded = false; _slipsLoaded = false; _posProductCache = [];
+    await renderPosBills(true);
+    toast('Items returned — stock and bill total updated', 'success');
+  } catch (err) {
+    toast(err.message || 'Failed to process the return', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ── Edit = load the bill back into the POS Terminal ──
+async function pbEdit(id) {
+  if (cart.length && !_posEditSaleId) {
+    if (!(await confirmModal('The POS Terminal already has items in its cart. They will be replaced by this bill\'s items.', { title: 'Replace Current Cart?', confirmText: 'Replace', icon: 'fa-pen', danger: false }))) return;
+  }
+  try {
+    const sale = await SalesAPI.get(id);
+    if (!_PB_ACTIVE.includes(sale.status)) { toast('This bill can no longer be edited.', 'warning'); return; }
+    const lines = (sale.items || []).filter(i => (i.quantity - Number(i.quantity_returned || 0)) > 0);
+    if (!lines.length) { toast('Nothing left on this bill to edit.', 'warning'); return; }
+
+    await _loadPosProducts();   // fresh stock — then add back what this bill currently holds (the edit reverses it first)
+    cart = lines.map(i => {
+      const remaining = i.quantity - Number(i.quantity_returned || 0);
+      _posStockByProduct[i.product] = (_posStockByProduct[i.product] || 0) + remaining;
+      const prod = _posProductCache.find(p => p.id === i.product);
+      return { id: i.product, name: i.product_name, price: Number(i.unit_price) || 0, qty: remaining, icon: '📦', taxRate: Number(i.tax_percent) || 0, barcode: (prod && prod.barcode) || '' };
+    });
+
+    _posEditSaleId = sale.id;
+    _posEditInvoice = sale.invoice_number;
+
+    navigate('pos');
+    await updatePosCustomers();
+    const custSel = document.getElementById('pos-customer');
+    if (custSel) custSel.value = sale.customer ? String(sale.customer) : '';
+
+    const lineSum = cart.reduce((a, c) => a + c.price * c.qty, 0);
+    const pct = lineSum > 0 ? Math.round((Number(sale.discount_amount) || 0) / lineSum * 10000) / 100 : 0;
+    document.getElementById('cart-discount').value = pct;
+    document.getElementById('cash-received').value = '';
+
+    const m = (sale.payments && sale.payments[0] && sale.payments[0].method) || 'cash';
+    const uiMethod = m === 'mobile_wallet' ? 'digital' : (m === 'card' ? 'card' : 'cash');
+    document.querySelectorAll('.payment-method').forEach(el => {
+      if ((el.getAttribute('onclick') || '').includes(`'${uiMethod}'`)) selectPayment(el, uiMethod);
+    });
+
+    document.getElementById('pos-edit-invoice').textContent = sale.invoice_number;
+    document.getElementById('pos-edit-banner').style.display = 'flex';
+    document.getElementById('pos-invoice').textContent = sale.invoice_number;
+    updateCartUI();
+    renderPosProducts();
+    toast(`Editing ${sale.invoice_number} — change the items, then press the pay button to save.`, 'success');
+  } catch (err) {
+    toast(err.message || 'Failed to open the bill for editing', 'error');
+  }
+}
+
+// Leaves edit mode (after saving, or when the user cancels) and restores real stock figures.
+async function posExitEdit() {
+  _posEditSaleId = null;
+  _posEditInvoice = '';
+  const banner = document.getElementById('pos-edit-banner');
+  if (banner) banner.style.display = 'none';
+  const inv = document.getElementById('pos-invoice');
+  if (inv) inv.textContent = 'INV-' + String(invoiceCounter).padStart(4, '0');
+  try { await _loadPosProducts(); } catch (_) { /* keep cached stock */ }
+  renderPosProducts();
+  updateCartUI();
+}
+
+async function posCancelEdit() {
+  if (!_posEditSaleId) return;
+  cart = [];
+  document.getElementById('cart-discount').value = 0;
+  document.getElementById('cash-received').value = '';
+  await posExitEdit();
+  toast('Edit cancelled — the bill was not changed.', 'warning');
+}
+
+// ═══════════════════════════════════════════════════════
+// PRODUCTS
+// ═══════════════════════════════════════════════════════
+// ── Local caches so we don't refetch categories/brands/warehouses on every render ──
+let _catCache = [];
+let _brandCache = [];
+let _defaultWarehouseId = null;
+let _prodPage = 1;
+const _prodPageSize = 20;
+
+// ═══════════════════════════════════════════════════════
+// PAGINATION — shared helper used by Products & Customers
+// (and any other list page that wants a numbered pager
+// instead of "load everything at once").
+// ═══════════════════════════════════════════════════════
+/**
+ * Renders a "« Prev  1 2 3 … 9  Next »" bar into the given container.
+ * @param {string} containerId - id of the element to render into
+ * @param {number} currentPage - 1-based current page
+ * @param {number} totalPages  - total number of pages
+ * @param {number} totalCount  - total number of records (for the "Showing X of Y" label)
+ * @param {number} pageSize    - records per page (for the "Showing X of Y" label)
+ * @param {function(number)} onPageChange - called with the new page number
+ */
+function renderPaginationBar(containerId, currentPage, totalPages, totalCount, pageSize, onPageChange) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  if (!totalPages || totalPages <= 0) totalPages = 1;
+  if (currentPage < 1) currentPage = 1;
+  if (currentPage > totalPages) currentPage = totalPages;
+
+  window.__paginationCallbacks = window.__paginationCallbacks || {};
+  window.__paginationCallbacks[containerId] = onPageChange;
+
+  const rangeStart = totalCount === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const rangeEnd = Math.min(currentPage * pageSize, totalCount);
+
+  // Build the list of page numbers to show: first, last, current ±1, with
+  // "…" filling the gaps so wide page counts don't produce a huge button row.
+  const pages = [];
+  const addPage = (n) => { if (!pages.includes(n)) pages.push(n); };
+  addPage(1);
+  for (let n = currentPage - 1; n <= currentPage + 1; n++) if (n >= 1 && n <= totalPages) addPage(n);
+  addPage(totalPages);
+  pages.sort((a, b) => a - b);
+
+  let pageBtns = '';
+  let prevNum = null;
+  pages.forEach(n => {
+    if (prevNum !== null && n - prevNum > 1) {
+      pageBtns += `<span class="pagination-ellipsis">…</span>`;
+    }
+    pageBtns += `<button type="button" class="pagination-btn ${n === currentPage ? 'active' : ''}"
+      onclick="window.__paginationCallbacks['${containerId}'](${n})">${n}</button>`;
+    prevNum = n;
+  });
+
+  el.innerHTML = `
+    <div class="pagination-info">Showing ${rangeStart}-${rangeEnd} of ${totalCount}</div>
+    <div class="pagination-controls">
+      <button type="button" class="pagination-btn" ${currentPage <= 1 ? 'disabled' : ''}
+        onclick="window.__paginationCallbacks['${containerId}'](${currentPage - 1})"><i class="fa fa-chevron-left"></i></button>
+      ${pageBtns}
+      <button type="button" class="pagination-btn" ${currentPage >= totalPages ? 'disabled' : ''}
+        onclick="window.__paginationCallbacks['${containerId}'](${currentPage + 1})"><i class="fa fa-chevron-right"></i></button>
+    </div>`;
+}
+
+async function _ensureDefaultWarehouse() {
+  if (_defaultWarehouseId) return _defaultWarehouseId;
+  const list = await WarehousesAPI.list();
+  const results = list.results || list;
+  let wh = results.find(w => w.is_default) || results[0];
+  if (!wh) {
+    wh = await WarehousesAPI.create({ name: 'Main Store', code: 'MAIN', is_default: true });
+  }
+  _defaultWarehouseId = wh.id;
+  return wh.id;
+}
+
+async function _findOrCreateBrand(name) {
+  name = (name||'').trim();
+  if (!name) return null;
+  const existing = _brandCache.find(b => b.name.trim().toLowerCase() === name.toLowerCase());
+  if (existing) return existing.id;
+  try {
+    const created = await BrandsAPI.create({ name });
+    _brandCache.push(created);
+    return created.id;
+  } catch (err) {
+    // Cache was stale (e.g. brand created by someone else, or sitting beyond
+    // whatever page size we last fetched) — the backend says it already
+    // exists, so look it up for real instead of surfacing the error.
+    const isDuplicate = err.status === 400 &&
+      JSON.stringify(err.data||{}).toLowerCase().includes('already exists');
+    if (!isDuplicate) throw err;
+    const found = await BrandsAPI.list({ search: name, page_size: 500 });
+    const match = (found.results||found).find(b => b.name.trim().toLowerCase() === name.toLowerCase());
+    if (match) { _brandCache.push(match); return match.id; }
+    throw err;
+  }
+}
+
+async function _findOrCreateCategory(name) {
+  // Category is REQUIRED on the backend (products can't be saved without
+  // one). If the sheet has no category column, or it's blank for this row,
+  // fall back to "Uncategorized" instead of sending null — sending null
+  // was causing the backend to reject every single product in the import.
+  name = (name||'').trim() || 'Uncategorized';
+  const existing = _catCache.find(c => c.name.trim().toLowerCase() === name.toLowerCase());
+  if (existing) return existing.id;
+  try {
+    const created = await CategoriesAPI.create({ name });
+    _catCache.push(created);
+    return created.id;
+  } catch (err) {
+    // Same stale-cache situation as _findOrCreateBrand above.
+    const isDuplicate = err.status === 400 &&
+      JSON.stringify(err.data||{}).toLowerCase().includes('already exists');
+    if (!isDuplicate) throw err;
+    const found = await CategoriesAPI.list({ search: name, page_size: 500 });
+    const match = (found.results||found).find(c => c.name.trim().toLowerCase() === name.toLowerCase());
+    if (match) { _catCache.push(match); return match.id; }
+    throw err;
+  }
+}
+
+async function renderProducts(page) {
+  try {
+    await populateCategorySelects();
+  } catch (err) {
+    toast('Failed to load categories: ' + (err.message||'unknown error'), 'error');
+  }
+  // A fresh search/filter always jumps back to page 1; otherwise keep (or
+  // move to) whichever page was requested by the pagination bar.
+  const isNewQuery = page === undefined;
+  _prodPage = isNewQuery ? 1 : page;
+
+  const q = (document.getElementById('prod-search')?.value||'').toLowerCase();
+  const catId = document.getElementById('prod-cat-filter')?.value||'';
+  const tbody = document.getElementById('products-table');
+  const params = {
+    search: q || undefined,
+    category: catId || undefined,
+    ordering: 'name',        // A → Z by product name
+    page: _prodPage,
+    page_size: _prodPageSize,
+  };
+  let prods = [];
+  let totalCount = 0, totalPages = 1;
+  try {
+    const data = await ProductsAPI.list(params);
+    prods = data.results || data;
+    totalCount = data.count ?? prods.length;
+    totalPages = data.total_pages ?? Math.max(1, Math.ceil(totalCount / _prodPageSize));
+    _prodPage = data.current_page ?? _prodPage;
+  } catch (err) {
+    toast('Failed to load products: ' + (err.message||'unknown error'), 'error');
+    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:20px;color:var(--red)">Could not load products — ${err.message||'server error'}</td></tr>`;
+    return;
+  }
+  renderPaginationBar('products-pagination', _prodPage, totalPages, totalCount, _prodPageSize, (p) => renderProducts(p));
+  tbody.innerHTML = prods.map(p => {
+    const status = p.status !== 'active' ? ['badge-yellow', p.status]
+      : ['badge-green', 'Active'];
+    const stock = Number(p.current_stock) || 0;
+    const stockBadge = stock <= 0 ? 'badge-red' : stock <= (p.reorder_level ?? 10) ? 'badge-yellow' : 'badge-green';
+    // Tax Inclusive column: a small tick when the product has a tax/GST
+    // rate set on it, a cross when it doesn't.
+    const hasTax = (Number(p.tax_rate) || 0) > 0;
+    const taxIcon = hasTax
+      ? '<i class="fa fa-check-circle" style="color:var(--green)" title="Tax inclusive"></i>'
+      : '<i class="fa fa-times-circle" style="color:var(--red)" title="No tax"></i>';
+    return `<tr>
+      <td><div class="flex-gap"><span style="font-size:20px">📦</span><div><div style="font-weight:600">${p.name}</div><div style="font-size:11px;color:var(--text-muted)">${p.brand_name||''}</div></div></div></td>
+      <td class="td-mono">${p.sku}</td>
+      <td><span class="badge badge-blue">${p.category_name||''}</span></td>
+      <td class="fw-700">Rs.${Number(p.cost_price ?? 0).toFixed(2)}</td>
+      <td class="fw-700 text-green">Rs.${Number(p.selling_price).toFixed(2)}</td>
+      <td><span class="badge ${stockBadge}">${stock}</span></td>
+      <td style="font-size:11px;color:var(--text-muted)">—</td>
+      <td style="text-align:center">${taxIcon}</td>
+      <td><span class="badge ${status[0]}">${status[1]}</span></td>
+      <td>
+        <div class="flex-gap">
+          <button class="btn btn-ghost btn-xs" onclick="editProduct(${p.id})"><i class="fa fa-edit"></i></button>
+          <button class="btn btn-ghost btn-xs" onclick="deleteProduct(${p.id})" style="color:var(--red)"><i class="fa fa-trash"></i></button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function populateCategorySelects() {
+  // page_size:500 so these caches hold the FULL list, not just the default
+  // first-20 page — otherwise a brand/category that exists but isn't in the
+  // first page looks "missing" to the frontend (see _findOrCreateBrand),
+  // and it tries to re-create it, which the backend then rejects as a
+  // duplicate ("brand with this name already exists").
+  const catData = await CategoriesAPI.list({ page_size: 500 });
+  _catCache = catData.results || catData;
+  ['prod-cat','prod-cat-filter'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const wasVal = el.value;
+    const isFilter = id.includes('filter');
+    el.innerHTML = (isFilter ? '<option value="">All Categories</option>' : '<option value="">Select Category</option>') +
+      _catCache.map(c => `<option value="${c.id}" ${String(c.id)===wasVal?'selected':''}>${c.name}</option>`).join('');
+  });
+  const brandData = await BrandsAPI.list({ page_size: 500 });
+  _brandCache = brandData.results || brandData;
+  const ps = document.getElementById('prod-supplier');
+  if (ps) {
+    const supData = await SuppliersAPI.list({ page_size: 500 });
+    const suppliers = supData.results || supData;
+    ps.innerHTML = '<option value="">Select Supplier</option>' + suppliers.map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+  }
+}
+
+async function openProductModal(id) {
+  await populateCategorySelects();
+  if (id) { await editProduct(id); return; }
+  document.getElementById('prod-modal-title').textContent = 'Add New Product';
+  document.getElementById('prod-edit-id').value = '';
+  ['prod-name','prod-sku','prod-brand','prod-barcode','prod-icon'].forEach(i => document.getElementById(i).value='');
+  ['prod-buy','prod-sell','prod-stock','prod-minstock'].forEach(i => document.getElementById(i).value='');
+  document.getElementById('prod-expiry').value='';
+  document.getElementById('prod-cat').value='';
+  document.getElementById('prod-supplier').value='';
+  document.getElementById('prod-stock').value = 0;
+  document.getElementById('prod-minstock').value = 10;
+  document.getElementById('prod-carton-qty').value = 0;
+  document.getElementById('prod-pieces-per-carton').value = 1;
+  openModal('product-modal');
+}
+
+async function editProduct(id) {
+  const p = await ProductsAPI.get(id);
+  document.getElementById('prod-modal-title').textContent = 'Edit Product';
+  document.getElementById('prod-edit-id').value = p.id;
+  document.getElementById('prod-name').value = p.name;
+  document.getElementById('prod-sku').value = p.sku;
+  document.getElementById('prod-brand').value = p.brand_name||'';
+  document.getElementById('prod-barcode').value = p.barcode;
+  document.getElementById('prod-buy').value = p.cost_price;
+  document.getElementById('prod-sell').value = p.selling_price;
+  document.getElementById('prod-discount').value = p.discount_percent;
+  document.getElementById('prod-tax').value = p.tax_rate;
+  document.getElementById('prod-minstock').value = p.reorder_level;
+  document.getElementById('prod-cat').value = p.category;
+  if (typeof calcProdPricing === 'function') calcProdPricing();
+  openModal('product-modal');
+}
+
+async function saveProduct() {
+  const name = document.getElementById('prod-name').value.trim();
+  const sku = document.getElementById('prod-sku').value.trim();
+  if (!name || !sku) { toast('Name and SKU are required!', 'error'); return; }
+  const editId = parseInt(document.getElementById('prod-edit-id').value);
+  const brandName = document.getElementById('prod-brand').value.trim();
+
+  try {
+    const brandId = await _findOrCreateBrand(brandName);
+    const payload = {
+      name, sku,
+      category: parseInt(document.getElementById('prod-cat').value) || null,
+      brand: brandId,
+      cost_price: parseFloat(document.getElementById('prod-buy').value) || 0,
+      selling_price: parseFloat(document.getElementById('prod-sell').value) || 0,
+      discount_percent: parseFloat(document.getElementById('prod-discount').value) || 0,
+      tax_rate: parseFloat(document.getElementById('prod-tax').value) || 0,
+      reorder_level: parseInt(document.getElementById('prod-minstock').value) || 10,
+    };
+    const barcode = document.getElementById('prod-barcode').value.trim();
+    if (barcode) payload.barcode = barcode;
+
+    let product;
+    if (editId) {
+      product = await ProductsAPI.update(editId, payload);
+      toastDone('update', 'Product', name);
+    } else {
+      product = await ProductsAPI.create(payload);
+      toastDone('add', 'Product', name);
+      // Initial stock quantity (Stock Quantity field) is set via a stock-in
+      // ledger entry against the default warehouse — Product itself carries
+      // no quantity field in this backend (stock is per-warehouse).
+      const initialStock = parseInt(document.getElementById('prod-stock').value) || 0;
+      if (initialStock > 0) {
+        const warehouseId = await _ensureDefaultWarehouse();
+        await InventoryAPI.stockIn({ product: product.id, warehouse: warehouseId, quantity: initialStock, reference: 'Initial stock' });
+      }
+    }
+    closeModal('product-modal');
+    // Editing an existing product should keep the user on whichever page
+    // they were on (that's where the product still lives after the price
+    // update) — only a brand-new product jumps back to page 1, since we
+    // don't know where it lands alphabetically.
+    renderProducts(editId ? _prodPage : undefined);
+  } catch (err) {
+    toast(err.message || 'Failed to save product', 'error');
+  }
+}
+
+async function deleteProduct(id) {
+  if (!(await confirmModal('This product will be permanently removed from your catalog.', { title: 'Delete Product?', confirmText: 'Delete Product' }))) return;
+  try {
+    await ProductsAPI.remove(id);
+    renderProducts();
+    toastDone('delete', 'Product');
+  } catch (err) {
+    toast(err.message || 'Failed to delete product', 'error');
+  }
+}
+
+let _catMgmtCache = [];
+
+async function addCategory() {
+  const val = document.getElementById('new-cat-name').value.trim();
+  if (!val) return;
+  try {
+    await CategoriesAPI.create({ name: val });
+    document.getElementById('new-cat-name').value='';
+    await renderCatList();
+    if (typeof populateCategorySelects === 'function') await populateCategorySelects();
+    toastDone('add', 'Category', val);
+  } catch (err) {
+    toast(err.message || 'Failed to add category', 'error');
+  }
+}
+async function renderCatList() {
+  const data = await CategoriesAPI.list({ page_size: 500 });
+  _catMgmtCache = data.results || data;
+  document.getElementById('cat-list').innerHTML = _catMgmtCache.map(c=>`
+    <div class="flex-between" style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <span style="font-size:13px">${c.name}</span>
+      <button class="btn btn-ghost btn-xs" onclick="deleteCategory(${c.id})" style="color:var(--red)"><i class="fa fa-trash"></i></button>
+    </div>`).join('');
+}
+async function deleteCategory(id) {
+  if (!(await confirmModal('This category will be permanently removed.', { title: 'Delete Category?', confirmText: 'Delete Category' }))) return;
+  try {
+    await CategoriesAPI.remove(id);
+    await renderCatList();
+    if (typeof populateCategorySelects === 'function') await populateCategorySelects();
+    toastDone('delete', 'Category');
+  } catch (err) {
+    toast(err.message || 'Failed to delete category — it may still be used by products', 'error');
+  }
+}
+const _catModalEl = document.getElementById('cat-modal');
+if (_catModalEl) _catModalEl.addEventListener('click', e => { if(e.target===_catModalEl) return; renderCatList(); });
+
+// ═══════════════════════════════════════════════════════
+// INVENTORY
+// ═══════════════════════════════════════════════════════
+let _invProductCache = [];   // full Product objects from backend (for name/sku/category/reorder_level)
+let _invStockByProduct = {}; // productId -> { quantity, is_low_stock, is_out_of_stock }
+
+async function _loadInventoryData() {
+  const [prodData, stockData] = await Promise.all([
+    ProductsAPI.list({ page_size: 500 }),
+    InventoryAPI.stockItems({ page_size: 1000 }),
+  ]);
+  _invProductCache = prodData.results || prodData;
+  _invStockByProduct = {};
+  const stockItems = stockData.results || stockData;
+  stockItems.forEach(si => {
+    const existing = _invStockByProduct[si.product] || { quantity: 0, is_low_stock: false, is_out_of_stock: false };
+    existing.quantity += si.quantity;
+    existing.is_low_stock = existing.is_low_stock || si.is_low_stock;
+    existing.is_out_of_stock = existing.quantity <= 0;
+    _invStockByProduct[si.product] = existing;
+  });
+}
+
+async function renderInventory() {
+  const q = (document.getElementById('inv-search')?.value||'').toLowerCase();
+  await _loadInventoryData();
+
+  const rows = _invProductCache.map(p => {
+    const s = _invStockByProduct[p.id] || { quantity: 0, is_low_stock: true, is_out_of_stock: true };
+    return { ...p, stock: s.quantity, is_low_stock: s.is_low_stock, is_out_of_stock: s.is_out_of_stock };
+  });
+
+  const inStock = rows.filter(p=>!p.is_low_stock && !p.is_out_of_stock).length;
+  const lowStock = rows.filter(p=>p.is_low_stock && !p.is_out_of_stock).length;
+  const outStock = rows.filter(p=>p.is_out_of_stock).length;
+  document.getElementById('inv-total').textContent = rows.length;
+  document.getElementById('inv-instock').textContent = inStock;
+  document.getElementById('inv-low').textContent = lowStock;
+  document.getElementById('inv-out').textContent = outStock;
+
+  const tbody = document.getElementById('inventory-table');
+  const filtered = rows.filter(p => (p.name||'').toLowerCase().includes(q));
+  tbody.innerHTML = filtered.map(p => {
+    const minStock = p.reorder_level || 10;
+    const pct = Math.min(100, (p.stock / (minStock*2)) * 100);
+    const color = p.is_out_of_stock ? 'var(--red)' : p.is_low_stock ? 'var(--yellow)' : 'var(--green)';
+    const statusBadge = p.is_out_of_stock ? 'badge-red' : p.is_low_stock ? 'badge-yellow' : 'badge-green';
+    const statusText = p.is_out_of_stock ? 'Out of Stock' : p.is_low_stock ? 'Low Stock' : 'In Stock';
+    return `<tr>
+      <td><div class="flex-gap"><span style="font-size:18px">📦</span><strong>${p.name}</strong></div></td>
+      <td>${p.category_name||'—'}</td>
+      <td class="fw-700" style="color:${color}">${p.stock}</td>
+      <td>${minStock}</td>
+      <td>${minStock*1.5|0}</td>
+      <td style="min-width:120px">
+        <div class="progress-bar">
+          <div class="progress-fill" style="width:${pct}%;background:${color}"></div>
+        </div>
+        <div style="font-size:10px;color:var(--text-muted);margin-top:2px">${pct.toFixed(0)}%</div>
+      </td>
+      <td><span class="badge ${statusBadge}">${statusText}</span></td>
+      <td><button class="btn btn-ghost btn-xs" onclick="openStockModal(${p.id})"><i class="fa fa-sliders-h"></i> Adjust</button></td>
+    </tr>`;
+  }).join('');
+
+  const hist = document.getElementById('stock-history');
+  const txnData = await InventoryAPI.transactions({ page_size: 10 });
+  const allHist = (txnData.results || txnData).map(t => {
+    const positiveTypes = ['stock_in','adjustment_increase','transfer_in','purchase','sale_return'];
+    const signedQty = positiveTypes.includes(t.transaction_type) ? t.quantity : -t.quantity;
+    return {
+      date: (t.created_at||'').replace('T',' ').slice(0,16),
+      product: t.product_name,
+      type: t.transaction_type.replace(/_/g,' '),
+      qty: signedQty,
+      before: t.balance_after - signedQty,
+      after: t.balance_after,
+      ref: t.reference || '—',
+    };
+  });
+  hist.innerHTML = allHist.map(h => {
+    const typeC = h.qty > 0 ? 'badge-green' : 'badge-red';
+    return `<tr>
+      <td class="td-mono" style="font-size:11px">${h.date}</td>
+      <td>${h.product}</td>
+      <td><span class="badge ${typeC}">${h.type}</span></td>
+      <td class="${h.qty>0?'text-green':'text-red'} fw-700">${h.qty>0?'+':''}${h.qty}</td>
+      <td>${h.before}</td>
+      <td>${h.after}</td>
+      <td class="td-mono" style="font-size:11px">${h.ref}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Stock Adjust helpers ─────────────────────────────
+let _adjSelectedPid = null;
+
+function adjSearchProducts(q) {
+  const drop = document.getElementById('adj-search-drop');
+  if (!q.trim()) { drop.style.display = 'none'; return; }
+  const lc = q.toLowerCase();
+  const results = _invProductCache.filter(p =>
+    (p.name||'').toLowerCase().includes(lc) ||
+    (p.sku||'').toLowerCase().includes(lc) ||
+    (p.barcode||'').toLowerCase().includes(lc)
+  ).slice(0, 12);
+  if (!results.length) {
+    drop.style.display = '';
+    drop.innerHTML = `<div style="padding:12px 16px;font-size:12px;color:var(--text-muted);text-align:center"><i class="fa fa-search"></i> No products found</div>`;
+    return;
+  }
+  drop.style.display = '';
+  drop.innerHTML = results.map(p => {
+    const stock = (_invStockByProduct[p.id]||{}).quantity || 0;
+    const minStock = p.reorder_level || 10;
+    const stockColor = stock <= 0 ? 'var(--red)' : stock <= minStock ? 'var(--yellow)' : 'var(--green)';
+    return `<div onclick="selectAdjProductById(${p.id})"
+      style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);transition:background .12s"
+      onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background=''">
+      <span style="font-size:20px;flex-shrink:0">📦</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
+        <div style="font-size:10px;color:var(--text-muted);font-family:var(--mono)">${p.sku||'—'} ${p.barcode?'• '+p.barcode:''}</div>
+      </div>
+      <div style="text-align:right;flex-shrink:0">
+        <div style="font-size:13px;font-weight:800;color:${stockColor}">${stock}</div>
+        <div style="font-size:9px;color:var(--text-muted)">in stock</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function selectAdjProductById(pid) {
+  const p = _invProductCache.find(x => x.id === pid);
+  if (!p) return;
+  const stock = (_invStockByProduct[pid]||{}).quantity || 0;
+  _adjSelectedPid = pid;
+  document.getElementById('adj-product').value = pid;
+  document.getElementById('adj-search').value  = p.name;
+  document.getElementById('adj-search-drop').style.display = 'none';
+  // Show product card
+  document.getElementById('adj-product-card').style.display = '';
+  document.getElementById('adj-prod-icon').textContent = '📦';
+  document.getElementById('adj-prod-name').textContent = p.name;
+  document.getElementById('adj-prod-sku').textContent  = (p.sku||'—') + (p.barcode?' | '+p.barcode:'');
+  document.getElementById('adj-current-stock').textContent = stock;
+  document.getElementById('adj-new-stock').textContent = stock;
+  document.getElementById('adj-delta-display').textContent = '±0';
+  document.getElementById('adj-qty').value = '';
+  updateAdjPreview();
+}
+
+function clearAdjProduct() {
+  _adjSelectedPid = null;
+  document.getElementById('adj-product').value = '';
+  document.getElementById('adj-search').value  = '';
+  document.getElementById('adj-product-card').style.display = 'none';
+  document.getElementById('adj-search-drop').style.display  = 'none';
+  document.getElementById('adj-qty').value = '';
+}
+
+function selectAdjType(type) {
+  document.getElementById('adj-type').value = type;
+  ['increase','decrease','damaged','returned'].forEach(t => {
+    const tile = document.getElementById('adj-tile-'+t);
+    if (!tile) return;
+    const isActive = t === type;
+    const colors = { increase:'var(--green)', decrease:'var(--red)', damaged:'var(--yellow)', returned:'var(--cyan)' };
+    tile.style.borderColor  = isActive ? colors[t] : 'var(--border)';
+    tile.style.background   = isActive ? 'rgba('+{
+      increase:'16,185,129', decrease:'239,68,68', damaged:'245,158,11', returned:'6,182,212'
+    }[t]+',.12)' : 'var(--bg-secondary)';
+    tile.style.transform = isActive ? 'scale(1.04)' : '';
+  });
+  updateAdjPreview();
+}
+
+function updateAdjPreview() {
+  const pid = _adjSelectedPid;
+  if (!pid) return;
+  const p = _invProductCache.find(x => x.id === pid);
+  if (!p) return;
+  const stock = (_invStockByProduct[pid]||{}).quantity || 0;
+  const minStock = p.reorder_level || 10;
+  const type = document.getElementById('adj-type').value;
+  const qty  = parseInt(document.getElementById('adj-qty').value) || 0;
+  const increases = ['increase', 'returned'];
+  const decreases = ['decrease', 'damaged'];
+  let delta = 0, newStock = stock;
+  if (increases.includes(type)) { delta = qty; newStock = stock + qty; }
+  else if (decreases.includes(type)) { delta = -qty; newStock = Math.max(0, stock - qty); }
+  const deltaEl = document.getElementById('adj-delta-display');
+  if (deltaEl) {
+    deltaEl.textContent = (delta >= 0 ? '+' : '') + delta;
+    deltaEl.style.color = delta >= 0 ? 'var(--green)' : 'var(--red)';
+  }
+  const newEl = document.getElementById('adj-new-stock');
+  if (newEl) {
+    newEl.textContent = newStock;
+    newEl.style.color = newStock <= 0 ? 'var(--red)' : newStock <= minStock ? 'var(--yellow)' : 'var(--green)';
+  }
+  const lowWarn  = document.getElementById('adj-low-warn');
+  const negWarn  = document.getElementById('adj-negative-warn');
+  if (lowWarn) lowWarn.style.display  = (newStock > 0 && newStock <= minStock) ? '' : 'none';
+  if (negWarn) negWarn.style.display  = (decreases.includes(type) && qty > stock) ? '' : 'none';
+}
+
+// Shared reset used both when the modal is first opened and after a
+// successful save (so the form is ready for the next adjustment without
+// closing/reopening the modal).
+function _resetStockAdjForm() {
+  clearAdjProduct();
+  selectAdjType('increase');
+  document.getElementById('adj-qty').value   = '';
+  document.getElementById('adj-notes').value = '';
+  document.getElementById('adj-reason').value = 'Stock Count';
+}
+
+async function openStockModal(pid) {
+  if (!_invProductCache.length) await _loadInventoryData();
+  _resetStockAdjForm();
+  // Pre-select product if pid passed
+  if (pid) selectAdjProductById(pid);
+  openModal('stock-modal');
+}
+
+async function saveStockAdj() {
+  const pid  = parseInt(document.getElementById('adj-product').value);
+  const type = document.getElementById('adj-type').value;
+  const qty  = parseInt(document.getElementById('adj-qty').value) || 0;
+  const prod = _invProductCache.find(p => p.id === pid);
+  if (!prod) { toast('Select a product first!', 'error'); return; }
+  if (qty <= 0) { toast('Enter a valid quantity!', 'error'); return; }
+
+  const reason = document.getElementById('adj-reason').value;
+  const notes  = document.getElementById('adj-notes').value;
+  const increases = ['increase', 'returned'];
+  const typeLabels = { increase:'Stock In', decrease:'Stock Out', damaged:'Damaged', returned:'Returned' };
+
+  try {
+    const warehouseId = await _ensureDefaultWarehouse();
+    const fullNotes = `${typeLabels[type]}${reason ? ' — '+reason : ''}${notes ? ' | '+notes : ''}`;
+    if (increases.includes(type)) {
+      await InventoryAPI.stockIn({ product: pid, warehouse: warehouseId, quantity: qty, reference: 'ADJ-'+Date.now(), notes: fullNotes });
+    } else {
+      await InventoryAPI.stockOut({ product: pid, warehouse: warehouseId, quantity: qty, reference: 'ADJ-'+Date.now(), notes: fullNotes });
+    }
+    // Stay open instead of closing — refresh the background data (so the
+    // adjust-search dropdown shows the just-updated stock number), reset
+    // the form back to a blank slate, and let the toast confirm the save.
+    // The modal now only closes when the user explicitly clicks Cancel/✕.
+    await renderInventory();
+    if (typeof renderProducts === 'function') renderProducts();
+    toast(`Stock ${increases.includes(type) ? 'increased' : 'decreased'} by ${qty} — ${prod.name}`, increases.includes(type) ? 'success' : 'warning');
+    _resetStockAdjForm();
+  } catch (err) {
+    toast(err.message || 'Failed to adjust stock', 'error');
+  }
+}
+
+// ── Stock adjust search — close dropdown on outside click
+document.addEventListener('click', e => {
+  if (!e.target.closest('#adj-search') && !e.target.closest('#adj-search-drop')) {
+    const drop = document.getElementById('adj-search-drop');
+    if (drop) drop.style.display = 'none';
+  }
+});
+const _orderStatusLabel = { completed:'Completed', cancelled:'Cancelled', returned:'Refunded', partially_returned:'Refunded', draft:'Pending' };
+let _orderCache = [];
+
+async function renderOrders() {
+  const q = (document.getElementById('ord-search')?.value||'').toLowerCase();
+  const sf = document.getElementById('ord-status-filter')?.value||'';
+  const data = await SalesAPI.list({ search: q || undefined, ordering: '-created_at', page_size: 200 });
+  _orderCache = data.results || data;
+
+  const withLabel = _orderCache.map(o => ({ ...o, statusLabel: _orderStatusLabel[o.status] || o.status }));
+  const filtered = withLabel.filter(o => !sf || o.statusLabel === sf);
+
+  document.getElementById('ord-completed').textContent = withLabel.filter(o=>o.statusLabel==='Completed').length;
+  document.getElementById('ord-pending').textContent = withLabel.filter(o=>o.statusLabel==='Pending').length;
+  document.getElementById('ord-cancelled').textContent = withLabel.filter(o=>o.statusLabel==='Cancelled').length;
+  document.getElementById('ord-refunded').textContent = withLabel.filter(o=>o.statusLabel==='Refunded').length;
+
+  const badges = { Completed:'badge-green', Pending:'badge-yellow', Cancelled:'badge-red', Refunded:'badge-purple' };
+  document.getElementById('orders-table').innerHTML = filtered.map(o=>`
+    <tr>
+      <td class="td-mono">${o.invoice_number}</td>
+      <td style="font-size:12px">${(o.created_at||'').replace('T',' ').slice(0,16)}</td>
+      <td>${o.customer_name||'Walk-in'}</td>
+      <td>${o.items.length} item(s)</td>
+      <td class="fw-700 text-green">Rs.${Number(o.total_amount).toFixed(2)}</td>
+      <td><span class="badge badge-blue">${(o.payments[0]?.method||'—').toUpperCase()}</span></td>
+      <td><span class="badge ${badges[o.statusLabel]||'badge-gray'}">${o.statusLabel}</span></td>
+      <td>
+        <div class="flex-gap">
+          <button class="btn btn-ghost btn-xs" onclick="viewOrder('${o.invoice_number}')"><i class="fa fa-eye"></i></button>
+          ${o.statusLabel==='Completed'?`<button class="btn btn-ghost btn-xs" onclick="toast('Receipt printed','success')"><i class="fa fa-print"></i></button>`:''}
+        </div>
+      </td>
+    </tr>`).join('');
+}
+
+async function viewOrder(inv) {
+  let o = _orderCache.find(x=>x.invoice_number===inv);
+  if (!o) {
+    // Not in the Orders History cache (e.g. opened from the Bookings list) — fetch fresh.
+    const data = await SalesAPI.list({ search: inv, page_size: 1 });
+    o = (data.results || data)[0];
+  }
+  if (!o) { toast('Order not found', 'error'); return; }
+  document.getElementById('od-title').textContent = 'Order — ' + inv;
+  document.getElementById('order-detail-body').innerHTML = `
+    <div class="grid-2" style="margin-bottom:16px">
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">CUSTOMER</div><div style="font-weight:600">${o.customer_name||'Walk-in'}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">DATE</div><div style="font-weight:600">${(o.created_at||'').replace('T',' ').slice(0,16)}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">PAYMENT METHOD</div><div style="font-weight:600">${(o.payments[0]?.method||'—').toUpperCase()}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">STATUS</div><span class="badge badge-green">${_orderStatusLabel[o.status]||o.status}</span></div>
+    </div>
+    <table><thead><tr><th>Product</th><th>Price</th><th>Qty</th><th>Total</th></tr></thead>
+    <tbody>${o.items.map(i=>`<tr><td>${i.product_name}</td><td>Rs.${Number(i.unit_price).toFixed(2)}</td><td>${i.quantity}</td><td>Rs.${Number(i.line_total).toFixed(2)}</td></tr>`).join('')}</tbody></table>
+    <div style="margin-top:16px;text-align:right">
+      <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px">Subtotal: Rs.${Number(o.subtotal).toFixed(2)}</div>
+      ${Number(o.discount_amount)>0?`<div style="font-size:13px;color:var(--red);margin-bottom:4px">Discount: -Rs.${Number(o.discount_amount).toFixed(2)}</div>`:''}
+      <div style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">Tax: +Rs.${Number(o.tax_amount).toFixed(2)}</div>
+      <div style="font-size:18px;font-weight:800">Total: Rs.${Number(o.total_amount).toFixed(2)}</div>
+    </div>`;
+  openModal('order-detail-modal');
+}
+
+// ═══════════════════════════════════════════════════════
+// CUSTOMERS
+// ═══════════════════════════════════════════════════════
+// ── CNIC helpers ─────────────────────────────────────
+function formatCnicInput(el) {
+  let raw = el.value.replace(/[^0-9]/g, '').slice(0, 13);
+  let formatted = raw;
+  if (raw.length > 5) formatted = raw.slice(0,5) + '-' + raw.slice(5);
+  if (raw.length > 12) formatted = raw.slice(0,5) + '-' + raw.slice(5,12) + '-' + raw.slice(12);
+  el.value = formatted;
+  validateCnic(el.value);
+}
+
+function validateCnic(val) {
+  const re = /^\d{5}-\d{7}-\d{1}$/;
+  const errEl    = document.getElementById('cust-cnic-error');
+  const statusEl = document.getElementById('cust-cnic-status');
+  if (!val) {
+    if (errEl) errEl.style.display = 'none';
+    if (statusEl) statusEl.textContent = '';
+    return true;
+  }
+  const valid = re.test(val);
+  if (errEl)    errEl.style.display    = valid ? 'none' : '';
+  if (statusEl) statusEl.textContent   = valid ? '✅' : '❌';
+  return valid;
+}
+
+function isCnicDuplicate(cnic, excludeId) {
+  if (!cnic) return false;
+  return _customerCache.some(c => c.cnic === cnic && c.id !== excludeId);
+}
+
+let _customerCache = [];
+let _custPage = 1;
+const _custPageSize = 20;
+
+async function renderCustomers(page) {
+  const isNewQuery = page === undefined;
+  _custPage = isNewQuery ? 1 : page;
+
+  const q = (document.getElementById('cust-search')?.value||'').toLowerCase();
+  const data = await CustomersAPI.list({
+    search: q || undefined,
+    ordering: 'name',        // A → Z by customer name
+    page: _custPage,
+    page_size: _custPageSize,
+  });
+  const filtered = data.results || data;
+  _customerCache = filtered;
+  const totalCount = data.count ?? filtered.length;
+  const totalPages = data.total_pages ?? Math.max(1, Math.ceil(totalCount / _custPageSize));
+  _custPage = data.current_page ?? _custPage;
+  renderPaginationBar('customers-pagination', _custPage, totalPages, totalCount, _custPageSize, (p) => renderCustomers(p));
+  document.getElementById('customers-table').innerHTML = filtered.map(c=>`
+    <tr>
+      <td><span class="badge badge-purple" style="font-family:var(--mono)">${accNo(c.id, c.account_no)}</span></td>
+      <td class="td-mono">CUST-${String(c.id).padStart(3,'0')}</td>
+      <td class="fw-700">${c.name}</td>
+      <td>${c.phone||'—'}</td>
+      <td style="font-family:var(--mono);font-size:12px">${c.cnic || '<span style="color:var(--text-muted)">—</span>'}</td>
+      <td>${c.email||'—'}</td>
+      <td class="${Number(c.outstanding_balance)>0?'text-red':'text-green'} fw-700">Rs.${Number(c.outstanding_balance).toFixed(2)}</td>
+      <td><span class="badge badge-purple">⭐ ${c.loyalty_points}</span></td>
+      <td style="font-size:12px">${(c.updated_at||'').split('T')[0]||'—'}</td>
+      <td>
+        <div class="flex-gap">
+          <button class="btn btn-ghost btn-xs" onclick="editCustomer(${c.id})"><i class="fa fa-edit"></i></button>
+          <button class="btn btn-ghost btn-xs" onclick="deleteCustomer(${c.id})" style="color:var(--red)"><i class="fa fa-trash"></i></button>
+        </div>
+      </td>
+    </tr>`).join('');
+}
+
+// Set when the customer modal was opened from New Booking ("+ New Shop"), so
+// the freshly added customer is selected on the bill straight away.
+let _custFromBooking = false;
+
+function openCustomerModalFromBooking() {
+  openCustomerModal();
+  _custFromBooking = true;
+  const acc = document.getElementById('cust-acc');
+  if (acc) acc.value = 'Assigned on save';
+}
+
+function openCustomerModal() {
+  _custFromBooking = false;
+  document.getElementById('cust-modal-title').textContent = 'Add Customer';
+  document.getElementById('cust-edit-id').value = '';
+  ['cust-name','cust-phone','cust-email','cust-address','cust-cnic'].forEach(i => {
+    const el = document.getElementById(i); if (el) el.value = '';
+  });
+  document.getElementById('cust-points').value = 0;
+  document.getElementById('cust-prev-balance').value = 0;
+  const errEl = document.getElementById('cust-cnic-error');
+  const statusEl = document.getElementById('cust-cnic-status');
+  if (errEl) errEl.style.display = 'none';
+  if (statusEl) statusEl.textContent = '';
+  const accEl = document.getElementById('cust-acc');
+  accEl.value = accNo((_customerCache.length||0)+1);
+  openModal('customer-modal');
+  // Ask the server for the real next number (current Settings prefix + next id) so the
+  // field is never stale or wrong. The final number is fixed by the server on save.
+  CustomersAPI.nextAccountNo().then(r => {
+    if (r && r.account_no && !document.getElementById('cust-edit-id').value) accEl.value = r.account_no;
+  }).catch(() => {});
+}
+
+function editCustomer(id) {
+  _custFromBooking = false;
+  const c = _customerCache.find(x => x.id === id);
+  if (!c) return;
+  document.getElementById('cust-modal-title').textContent = 'Edit Customer';
+  document.getElementById('cust-edit-id').value    = c.id;
+  document.getElementById('cust-name').value       = c.name;
+  document.getElementById('cust-phone').value      = c.phone || '';
+  document.getElementById('cust-email').value      = c.email || '';
+  document.getElementById('cust-address').value    = c.address || '';
+  document.getElementById('cust-points').value     = c.loyalty_points || 0;
+  document.getElementById('cust-acc').value        = accNo(c.id, c.account_no);
+  document.getElementById('cust-prev-balance').value = c.outstanding_balance || 0;
+  const cnicEl = document.getElementById('cust-cnic');
+  if (cnicEl) { cnicEl.value = c.cnic || ''; }
+  openModal('customer-modal');
+}
+
+let _custSaving = false;   // blocks a second click while the first save is still running
+async function saveCustomer() {
+  if (_custSaving) return;
+  const name = document.getElementById('cust-name').value.trim();
+  if (!name) { toast('Customer name is required!', 'error'); return; }
+
+  const cnic    = (document.getElementById('cust-cnic')?.value || '').trim();
+  const editId  = parseInt(document.getElementById('cust-edit-id').value);
+
+  // CNIC format is still validated client-side; the backend now has a real
+  // column for it (see Customer.cnic), so it's included in the save payload.
+  if (cnic && !/^\d{5}-\d{7}-\d{1}$/.test(cnic)) {
+    toast('Invalid CNIC format. Use: 35202-1234567-1', 'error');
+    document.getElementById('cust-cnic')?.focus();
+    return;
+  }
+  if (cnic && isCnicDuplicate(cnic, editId)) {
+    toast('This CNIC is already registered to another customer.', 'error');
+    document.getElementById('cust-cnic')?.focus();
+    return;
+  }
+
+  const payload = {
+    name,
+    cnic,
+    phone: document.getElementById('cust-phone').value,
+    email: document.getElementById('cust-email').value,
+    address: document.getElementById('cust-address').value,
+    loyalty_points: parseInt(document.getElementById('cust-points').value) || 0,
+    outstanding_balance: parseFloat(document.getElementById('cust-prev-balance').value) || 0,
+  };
+
+  _custSaving = true;
+  try {
+    let created = null;
+    if (editId) {
+      await CustomersAPI.update(editId, payload);
+      toastDone('update', 'Customer', name);
+    } else {
+      created = await CustomersAPI.create(payload);
+      toastDone('add', 'Customer', name);
+    }
+    closeModal('customer-modal');
+    if (_custFromBooking && created && created.id) {
+      // Added from New Booking: put the new shop on the bill right away
+      // (no need to leave the page or search for it again).
+      _custFromBooking = false;
+      if (!_bkCustomerCache.some(c => c.id === created.id)) _bkCustomerCache.push(created);
+      document.getElementById('bk-customer').value = created.id;
+      document.getElementById('bk-customer-search').value = created.name;
+      if (_bkBalances) _bkBalances[created.id] = { remaining: 0 };
+      onBookingCustomerChange();
+      return;
+    }
+    renderCustomers();
+    if (typeof updatePosCustomers === 'function') updatePosCustomers();
+  } catch (err) {
+    toast(err.message || 'Failed to save customer', 'error');
+  } finally {
+    _custSaving = false;
+  }
+}
+
+async function deleteCustomer(id) {
+  if (!(await confirmModal('This customer record will be permanently removed.', { title: 'Delete Customer?', confirmText: 'Delete Customer' }))) return;
+  try {
+    await CustomersAPI.remove(id);
+    // Stay on whichever page the user was browsing instead of jumping back
+    // to page 1 — deleting an entry doesn't change where they were looking.
+    // renderPaginationBar/renderCustomers will clamp automatically if this
+    // was the last item on the last page.
+    renderCustomers(_custPage);
+    toastDone('delete', 'Customer');
+  } catch (err) {
+    toast(err.message || 'Failed to delete customer', 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// SUPPLIERS
+// ═══════════════════════════════════════════════════════
+let _supplierCache = [];
+
+async function renderSuppliers() {
+  const q = (document.getElementById('sup-search')?.value||'').toLowerCase();
+  const data = await SuppliersAPI.list({ search: q || undefined });
+  const filtered = data.results || data;
+  _supplierCache = filtered;
+  document.getElementById('suppliers-table').innerHTML = filtered.map(s=>`
+    <tr>
+      <td class="td-mono">SUP-${String(s.id).padStart(3,'0')}</td>
+      <td class="fw-700">${s.name}</td>
+      <td>${s.phone||'—'}</td>
+      <td>${s.email||'—'}</td>
+      <td style="font-size:12px">${s.address||'—'}</td>
+      <td class="${Number(s.outstanding_payable)>0?'text-red':'text-green'} fw-700">Rs.${Number(s.outstanding_payable).toFixed(2)} ${Number(s.outstanding_payable)>0?'(owed)':''}</td>
+      <td><span class="badge badge-green">${s.is_active?'Active':'Inactive'}</span></td>
+      <td>
+        <div class="flex-gap">
+          <button class="btn btn-ghost btn-xs" onclick="editSupplier(${s.id})"><i class="fa fa-edit"></i></button>
+          <button class="btn btn-ghost btn-xs" onclick="deleteSupplier(${s.id})" style="color:var(--red)"><i class="fa fa-trash"></i></button>
+        </div>
+      </td>
+    </tr>`).join('');
+}
+
+function openSupplierModal() {
+  document.getElementById('sup-modal-title').textContent='Add Supplier';
+  document.getElementById('sup-edit-id').value='';
+  ['sup-name','sup-phone','sup-email','sup-address'].forEach(i=>document.getElementById(i).value='');
+  document.getElementById('sup-balance').value=0;
+  openModal('supplier-modal');
+}
+
+function editSupplier(id) {
+  const s=_supplierCache.find(x=>x.id===id);
+  if (!s) return;
+  document.getElementById('sup-modal-title').textContent='Edit Supplier';
+  document.getElementById('sup-edit-id').value=s.id;
+  document.getElementById('sup-name').value=s.name;
+  document.getElementById('sup-phone').value=s.phone||'';
+  document.getElementById('sup-email').value=s.email||'';
+  document.getElementById('sup-address').value=s.address||'';
+  document.getElementById('sup-balance').value=s.outstanding_payable;
+  openModal('supplier-modal');
+}
+
+async function saveSupplier() {
+  const name=document.getElementById('sup-name').value.trim();
+  if (!name) { toast('Name required!','error'); return; }
+  const editId=parseInt(document.getElementById('sup-edit-id').value);
+  const payload={
+    name,
+    phone: document.getElementById('sup-phone').value,
+    email: document.getElementById('sup-email').value,
+    address: document.getElementById('sup-address').value,
+    outstanding_payable: parseFloat(document.getElementById('sup-balance').value)||0,
+    is_active: true,
+  };
+  try {
+    if (editId) {
+      await SuppliersAPI.update(editId, payload);
+      toastDone('update', 'Supplier', name);
+    } else {
+      await SuppliersAPI.create(payload);
+      toastDone('add', 'Supplier', name);
+    }
+    closeModal('supplier-modal');
+    renderSuppliers();
+  } catch (err) {
+    toast(err.message || 'Failed to save supplier', 'error');
+  }
+}
+
+async function deleteSupplier(id) {
+  if (!(await confirmModal('This supplier record will be permanently removed.', { title: 'Delete Supplier?', confirmText: 'Delete Supplier' }))) return;
+  try {
+    await SuppliersAPI.remove(id);
+    renderSuppliers();
+    toastDone('delete', 'Supplier');
+  } catch (err) {
+    toast(err.message || 'Failed to delete supplier', 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// PURCHASES
+// ═══════════════════════════════════════════════════════
+let _purchaseCache = [];
+let _purSupplierCache = [];
+let _purProductCache = [];
+
+async function renderPurchases() {
+  const data = await PurchaseAPI.list({ page_size: 200 });
+  _purchaseCache = data.results || data;
+  document.getElementById('purchases-table').innerHTML = _purchaseCache.map(p=>`
+    <tr>
+      <td class="td-mono">${p.po_number}</td>
+      <td style="font-size:12px">${(p.created_at||'').split('T')[0]}</td>
+      <td>${p.supplier_name||'Unknown'}</td>
+      <td>${p.items.length} item(s)</td>
+      <td class="fw-700">Rs.${Number(p.total_amount).toFixed(2)}</td>
+      <td><span class="badge ${p.status==='received'?'badge-green':p.status==='partially_received'?'badge-yellow':'badge-blue'}">${p.status.replace(/_/g,' ')}</span></td>
+      <td>
+        <div class="flex-gap">
+          <button class="btn btn-ghost btn-xs"><i class="fa fa-eye"></i></button>
+        </div>
+      </td>
+    </tr>`).join('');
+}
+
+let purItems = [];
+async function openPurchaseModal() {
+  const [supData, prodData] = await Promise.all([
+    SuppliersAPI.list({ page_size: 500 }),
+    ProductsAPI.list({ page_size: 500 }),
+  ]);
+  _purSupplierCache = supData.results || supData;
+  _purProductCache = prodData.results || prodData;
+  document.getElementById('pur-supplier').innerHTML = _purSupplierCache.map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+  document.getElementById('pur-date').value = new Date().toISOString().split('T')[0];
+  purItems = [{productId:'',qty:1,price:0}];
+  renderPurItems();
+  openModal('purchase-modal');
+}
+
+function renderPurItems() {
+  document.getElementById('pur-items-list').innerHTML = purItems.map((item,i)=>`
+    <div class="form-row" style="align-items:flex-end;margin-bottom:10px">
+      <div class="form-group-inline" style="margin-bottom:0">
+        <label>Product</label>
+        <select class="form-input" onchange="purItemChange(${i},'product',this.value)" style="padding:9px 12px">
+          <option value="">Select Product</option>
+          ${_purProductCache.map(p=>`<option value="${p.id}" ${item.productId==p.id?'selected':''}>${p.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group-inline" style="margin-bottom:0;width:90px">
+        <label>Qty</label>
+        <input class="form-input" type="number" value="${item.qty}" min="1" onchange="purItemChange(${i},'qty',this.value)" style="padding:9px 12px">
+      </div>
+      <div class="form-group-inline" style="margin-bottom:0;width:100px">
+        <label>Price (Rs.)</label>
+        <input class="form-input" type="number" value="${item.price}" step="0.01" onchange="purItemChange(${i},'price',this.value)" style="padding:9px 12px">
+      </div>
+      <button class="btn btn-ghost btn-xs" onclick="removePurItem(${i})" style="color:var(--red);margin-bottom:2px"><i class="fa fa-times"></i></button>
+    </div>`).join('');
+  const total = purItems.reduce((a,i)=>a+i.qty*i.price,0);
+  document.getElementById('pur-total').textContent = 'Rs.'+total.toFixed(2);
+}
+
+function purItemChange(i,field,val) {
+  if (field==='product') {
+    purItems[i].productId=parseInt(val)||'';
+    const prod=_purProductCache.find(p=>p.id==val);
+    if(prod) purItems[i].price=Number(prod.cost_price) || 0;
+  } else if(field==='qty') purItems[i].qty=parseInt(val)||1;
+  else purItems[i].price=parseFloat(val)||0;
+  renderPurItems();
+}
+function addPurItem() { purItems.push({productId:'',qty:1,price:0}); renderPurItems(); }
+function removePurItem(i) { purItems.splice(i,1); renderPurItems(); }
+
+let _savingPurchase = false;
+
+async function savePurchase() {
+  if (_savingPurchase) return; // guards against double-click firing this twice
+  const validItems = purItems.filter(i=>i.productId);
+  if (!validItems.length) { toast('Add at least one product','error'); return; }
+  const supplierId = parseInt(document.getElementById('pur-supplier').value);
+  if (!supplierId) { toast('Select a supplier','error'); return; }
+
+  // A Rs.0 line item almost always means the product's cost price was never
+  // set (or the price field wasn't edited) — block save with a clear message
+  // instead of letting the backend reject a Rs.0 "Paid" payment cryptically.
+  const zeroPriceItems = validItems.filter(i => !i.price || i.price <= 0);
+  if (zeroPriceItems.length) {
+    toast('Set a price greater than Rs.0 for every item before saving (check: ' +
+      zeroPriceItems.map(i => _purProductCache.find(p=>p.id==i.productId)?.name || 'item').join(', ') + ')', 'error');
+    return;
+  }
+
+  _savingPurchase = true;
+  const saveBtn = document.querySelector('#purchase-modal .btn-accent, #purchase-modal [onclick="savePurchase()"]');
+  if (saveBtn) saveBtn.disabled = true;
+
+  try {
+    const warehouseId = await _ensureDefaultWarehouse();
+    const items = validItems.map(i => ({
+      product: i.productId, quantity_ordered: i.qty, unit_cost: i.price,
+    }));
+
+    // Create the PO
+    const po = await PurchaseAPI.create({
+      supplier: supplierId, warehouse: warehouseId, items,
+      notes: document.getElementById('pur-notes').value,
+    });
+
+    // Receive everything immediately (this UI is a single-step "record a
+    // completed purchase" form, so ordered == received in one action).
+    await PurchaseAPI.receive(po.id, {
+      items: po.items.map(it => ({ purchase_order_item: it.id, quantity: it.quantity_ordered })),
+    });
+
+    // Pay in full if the form says "Paid" — total_amount is guaranteed > 0
+    // here since we already blocked Rs.0-priced items above.
+    const paymentStatus = document.getElementById('pur-payment').value;
+    if (paymentStatus === 'Paid' && Number(po.total_amount) > 0) {
+      await PurchaseAPI.pay(po.id, { amount: po.total_amount, method: 'bank_transfer' });
+    }
+
+    closeModal('purchase-modal');
+    renderPurchases();
+    if (typeof renderProducts === 'function') renderProducts();
+    toast('Purchase order saved and stock received!','success');
+  } catch (err) {
+    toast(err.message || 'Failed to save purchase', 'error');
+  } finally {
+    _savingPurchase = false;
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// EXPENSES
+// ═══════════════════════════════════════════════════════
+let _expenseCache = [];
+let _expenseCategoryCache = [];
+
+async function _findOrCreateExpenseCategory(name) {
+  if (!_expenseCategoryCache.length) {
+    const data = await ExpensesAPI.categories();
+    _expenseCategoryCache = data.results || data;
+  }
+  const existing = _expenseCategoryCache.find(c => c.name.toLowerCase() === name.toLowerCase());
+  if (existing) return existing.id;
+  const created = await ExpensesAPI.createCategory({ name });
+  _expenseCategoryCache.push(created);
+  return created.id;
+}
+
+// Fills the category suggestions in the Add Expense form (free typing still allowed).
+async function _loadExpenseCategoryOptions(force) {
+  try {
+    if (force || !_expenseCategoryCache.length) {
+      const data = await ExpensesAPI.categories();
+      _expenseCategoryCache = data.results || data;
+    }
+  } catch (_) { /* suggestions are optional */ }
+  const list = document.getElementById('exp-cat-list');
+  if (list) list.innerHTML = _expenseCategoryCache
+    .filter(c => c.is_active !== false)
+    .map(c => `<option value="${_p3Esc(c.name)}"></option>`).join('');
+}
+
+async function openExpenseCategoryModal() {
+  document.getElementById('exp-newcat-name').value = '';
+  await _loadExpenseCategoryOptions(true);
+  const names = _expenseCategoryCache.map(c => _p3Esc(c.name)).join(', ');
+  document.getElementById('exp-cat-existing').innerHTML = names ? `Existing: ${names}` : '';
+  openModal('expense-cat-modal');
+  setTimeout(() => document.getElementById('exp-newcat-name').focus(), 50);
+}
+
+async function saveExpenseCategory() {
+  const name = document.getElementById('exp-newcat-name').value.trim();
+  if (!name) { toast('Category name required!', 'error'); return; }
+  try {
+    await _loadExpenseCategoryOptions(true);
+    if (_expenseCategoryCache.some(c => c.name.toLowerCase() === name.toLowerCase())) {
+      toast('This category already exists', 'warning');
+      return;
+    }
+    await _findOrCreateExpenseCategory(name);
+    await _loadExpenseCategoryOptions(true);
+    closeModal('expense-cat-modal');
+    toastDone('add', 'Expense Category', name);
+  } catch (err) {
+    toast(err.message || 'Failed to add category', 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// EXPENSES — 3D EXPLODED PIE (pure SVG, no library)
+// Extruded pie with tilted top face, side walls, drop shadow, exploded
+// slices, % on every slice and lettered call-outs (A, B, C…) with leader
+// lines. Hover lifts a slice + shows a tooltip; click filters the table.
+// ═══════════════════════════════════════════════════════
+const EXP3D_COLORS = ['#ea6c4d', '#f4b63f', '#8c5a3c', '#d9c7a8', '#c0443a', '#5fa8a0', '#8b7bd0', '#3f8fd2', '#c76fa6'];
+const EXP3D_OTHERS = '#9aa3b2';
+const _p3Pct = p => (p > 0 && p < 0.1) ? '&lt;0.1' : p.toFixed(1);   // true share, never shown as a misleading 0.0
+let _expPieRows = [];   // category groups (colour + letter) shared by both charts
+let _expCatFilter = null;   // { name, cats:[...] } while a slice is selected
+
+function _p3Esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function _p3Shade(hex, amt) {            // amt > 0 lightens toward white, < 0 darkens toward black
+  const n = parseInt(hex.slice(1), 16);
+  let r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  const t = amt < 0 ? 0 : 255, k = Math.abs(amt);
+  r = Math.round((t - r) * k + r); g = Math.round((t - g) * k + g); b = Math.round((t - b) * k + b);
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+}
+function _p3Money(n, dec) { return 'Rs.' + Number(n).toLocaleString('en-PK', { minimumFractionDigits: dec || 0, maximumFractionDigits: dec || 0 }); }
+
+function renderExpense3DPie(expenses) {
+  const wrap = document.getElementById('exp3d-wrap');
+  if (!wrap) return;
+
+  // ── Totals per category (top 7 by amount, the rest grouped as "Others") ──
+  const totals = {}, counts = {};
+  expenses.forEach(e => {
+    const k = e.category_name || 'Uncategorized';
+    totals[k] = (totals[k] || 0) + Number(e.amount || 0);
+    counts[k] = (counts[k] || 0) + 1;
+  });
+  let rows = Object.keys(totals).map(k => ({ name: k, value: totals[k], count: counts[k], cats: [k] }))
+    .filter(r => r.value > 0).sort((a, b) => b.value - a.value);
+  if (rows.length > 10) {
+    const rest = rows.slice(9);
+    rows = rows.slice(0, 9).concat([{ name: 'Others', value: rest.reduce((s, r) => s + r.value, 0),
+      count: rest.reduce((s, r) => s + r.count, 0), cats: rest.map(r => r.name) }]);
+  }
+  const total = rows.reduce((s, r) => s + r.value, 0);
+  rows.forEach((r, i) => { r.color = r.name === 'Others' ? EXP3D_OTHERS : EXP3D_COLORS[i % EXP3D_COLORS.length]; r.letter = String.fromCharCode(65 + i); r.i = i; });
+  _expPieRows = rows;   // the Monthly chart reuses these exact colours / letters
+  const totEl = document.getElementById('exp3d-total');
+  if (totEl) totEl.textContent = total > 0 ? 'Total ' + _p3Money(total, 2) : '';
+
+  if (!total) {
+    wrap.innerHTML = '<div style="height:240px;display:flex;align-items:center;justify-content:center;color:var(--text-secondary);font-size:13px">No expenses yet — add one to see the breakdown.</div>';
+    return;
+  }
+
+  // ── Geometry ──
+  const W = 720, H = 440, cx = 360, cy = 196, rx = 128, ry = 68, depth = 38;
+  const E0 = 8, E1 = 20;                         // resting / hover explosion distance
+  const P = (a, ox = 0, oy = 0) => [cx + ox + rx * Math.cos(a), cy + oy + ry * Math.sin(a)];
+  const f = n => n.toFixed(2);
+
+  // A category that is 0.01% of the total would be an invisible sliver, so every
+  // slice is drawn at least MIN_SHARE of the circle (the rest is shrunk to fit);
+  // the % shown in labels / tooltips is always the TRUE share.
+  const MIN_SHARE = Math.min(0.06, 0.6 / rows.length);
+  const wts = rows.map(r => Math.max(r.value / total, MIN_SHARE));
+  const wsum = wts.reduce((x, y) => x + y, 0);
+  let a = -Math.PI / 2;
+  rows.forEach((r, i) => {
+    r.pct = r.value / total * 100;
+    r.a0 = a; r.a1 = a + (wts[i] / wsum) * Math.PI * 2; r.mid = (r.a0 + r.a1) / 2; a = r.a1;
+    r.dx = Math.cos(r.mid) * E0; r.dy = Math.sin(r.mid) * E0 * (ry / rx);
+    r.hx = Math.cos(r.mid) * E1; r.hy = Math.sin(r.mid) * E1 * (ry / rx);
+  });
+
+  // ── Defs: gradients per slice + blurred shadow ──
+  let defs = '<filter id="p3-blur" x="-30%" y="-60%" width="160%" height="220%"><feGaussianBlur stdDeviation="14"/></filter>';
+  rows.forEach(r => {
+    defs += `<linearGradient id="p3t${r.i}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${_p3Shade(r.color, .22)}"/><stop offset="1" stop-color="${_p3Shade(r.color, -.06)}"/></linearGradient>
+      <linearGradient id="p3w${r.i}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${_p3Shade(r.color, -.30)}"/><stop offset="1" stop-color="${_p3Shade(r.color, -.55)}"/></linearGradient>`;
+  });
+
+  // ── Slices, painted back → front so nearer slices overlap farther ones ──
+  const full = rows.length === 1;
+  let slices = '';
+  [...rows].sort((p, q) => Math.sin(p.mid) - Math.sin(q.mid)).forEach(r => {
+    let body = '';
+    const [x0, y0] = P(r.a0), [x1, y1] = P(r.a1);
+    if (full) {
+      body += `<path d="M${cx - rx},${cy} L${cx - rx},${cy + depth} A${rx},${ry} 0 0 0 ${cx + rx},${cy + depth} L${cx + rx},${cy} A${rx},${ry} 0 0 1 ${cx - rx},${cy} Z" fill="url(#p3w${r.i})"/>`;
+      body += `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="url(#p3t${r.i})"/>`;
+    } else {
+      // flat cut faces — only the ones that face the viewer
+      if (Math.cos(r.a0) < 0) body += `<path d="M${cx},${cy} L${f(x0)},${f(y0)} L${f(x0)},${f(y0 + depth)} L${cx},${cy + depth} Z" fill="${_p3Shade(r.color, -.38)}"/>`;
+      if (Math.cos(r.a1) > 0) body += `<path d="M${cx},${cy} L${f(x1)},${f(y1)} L${f(x1)},${f(y1 + depth)} L${cx},${cy + depth} Z" fill="${_p3Shade(r.color, -.26)}"/>`;
+      // curved wall — only the front half of the pie (sin θ > 0) is visible
+      const s = Math.max(r.a0, 0), e = Math.min(r.a1, Math.PI);
+      if (e > s + 1e-4) {
+        const [sx, sy] = P(s), [ex, ey] = P(e), lg = (e - s) > Math.PI ? 1 : 0;
+        body += `<path d="M${f(sx)},${f(sy)} A${rx},${ry} 0 ${lg} 1 ${f(ex)},${f(ey)} L${f(ex)},${f(ey + depth)} A${rx},${ry} 0 ${lg} 0 ${f(sx)},${f(sy + depth)} Z" fill="url(#p3w${r.i})"/>`;
+      }
+      // top face
+      body += `<path d="M${cx},${cy} L${f(x0)},${f(y0)} A${rx},${ry} 0 ${(r.a1 - r.a0) > Math.PI ? 1 : 0} 1 ${f(x1)},${f(y1)} Z" fill="url(#p3t${r.i})" stroke="${_p3Shade(r.color, .35)}" stroke-opacity=".35" stroke-width="1"/>`;
+    }
+    // % on the slice
+    if (r.pct >= 5 || (rows.length > 1 && (r.a1 - r.a0) > 0.5 && r.pct >= 1)) {
+      const [tx, ty] = [cx + Math.cos(r.mid) * rx * (full ? 0 : .6), cy + Math.sin(r.mid) * ry * (full ? 0 : .6)];
+      body += `<text x="${f(tx)}" y="${f(ty)}" text-anchor="middle" dominant-baseline="middle" style="font:800 ${r.pct >= 10 ? 17 : 13}px var(--font);fill:#fff;paint-order:stroke;stroke:rgba(0,0,0,.28);stroke-width:2.5px;pointer-events:none">${r.pct >= 10 ? r.pct.toFixed(0) : _p3Pct(r.pct)}%</text>`;
+    }
+    slices += `<g class="p3-slice" data-i="${r.i}" style="cursor:pointer;transition:transform .28s ease, opacity .25s ease;transform:translate(${f(r.dx)}px,${f(r.dy)}px)">${body}</g>`;
+  });
+
+  // ── Call-outs: lettered badge + name pill + amount, with a leader line ──
+  // Side = which half of the pie the slice sits in; if one side gets crowded,
+  // the slices nearest the vertical axis hop to the other side so labels stay readable.
+  const right = rows.filter(r => Math.cos(r.mid) >= 0), left = rows.filter(r => Math.cos(r.mid) < 0);
+  while (left.length - right.length > 1) { left.sort((p, q) => Math.cos(q.mid) - Math.cos(p.mid)); right.push(left.shift()); }
+  while (right.length - left.length > 1) { right.sort((p, q) => Math.cos(p.mid) - Math.cos(q.mid)); left.push(right.shift()); }
+  right.forEach(r => r.right = true); left.forEach(r => r.right = false);
+  // Label slots are evenly spaced; the slot order is chosen (brute force, ≤7 per
+  // side) so leader lines never cross each other and stay as short as possible.
+  const place = list => {
+    list.forEach(r => { r.ax = cx + r.dx + Math.cos(r.mid) * rx; r.ay = cy + r.dy + Math.sin(r.mid) * ry + (Math.sin(r.mid) > 0 ? depth * .35 : 0); });
+    const n = list.length; if (!n) return;
+    const gap = 64, minY = 40, maxY = H - 58, X = list[0].right ? 546 : 174;
+    const mean = list.reduce((t, r) => t + r.ay, 0) / n;
+    const start = Math.min(Math.max(mean - (n - 1) * gap / 2, minY), maxY - (n - 1) * gap);
+    const slots = list.map((_, k) => start + k * gap);
+    const cross = (p1, p2, p3, p4) => {
+      const d = (a1, b1, c1) => (c1[0] - a1[0]) * (b1[1] - a1[1]) - (c1[1] - a1[1]) * (b1[0] - a1[0]);
+      return d(p1, p2, p3) * d(p1, p2, p4) < 0 && d(p3, p4, p1) * d(p3, p4, p2) < 0;
+    };
+    let best = null, bestCost = Infinity;
+    const perm = (arr, k) => {
+      if (k === arr.length) {
+        let cost = 0; const segs = arr.map((idx, i) => [[list[idx].ax, list[idx].ay], [X, slots[i]]]);
+        segs.forEach(sg => { cost += Math.hypot(sg[1][0] - sg[0][0], sg[1][1] - sg[0][1]); });
+        for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) if (cross(segs[i][0], segs[i][1], segs[j][0], segs[j][1])) cost += 5000;
+        if (cost < bestCost) { bestCost = cost; best = arr.slice(); }
+        return;
+      }
+      for (let i = k; i < arr.length; i++) { [arr[k], arr[i]] = [arr[i], arr[k]]; perm(arr, k + 1); [arr[k], arr[i]] = [arr[i], arr[k]]; }
+    };
+    perm(list.map((_, i) => i), 0);
+    best.forEach((idx, slot) => { list[idx].ly = n === 1 ? Math.min(Math.max(list[idx].ay, minY), maxY) : slots[slot]; });
+  };
+  place(right); place(left);
+
+  let callouts = '';
+  rows.forEach(r => {
+    const isR = r.right, dir = isR ? 1 : -1;
+    const edgeX = isR ? 566 : 154, elbowX = isR ? 546 : 174;
+    const label = r.name.length > 12 ? r.name.slice(0, 11) + '…' : r.name;
+    const pw = Math.round(label.length * 7.8 + 22);
+    const badgeX = edgeX + dir * 13, pillX0 = isR ? edgeX + 32 : edgeX - 32 - pw, textX = isR ? edgeX + 32 : edgeX - 32;
+    callouts += `<g class="p3-call" data-i="${r.i}" style="cursor:pointer;transition:opacity .25s ease">
+      <polyline points="${f(r.ax)},${f(r.ay)} ${elbowX},${f(r.ly)} ${edgeX},${f(r.ly)}" fill="none" stroke="${r.color}" stroke-width="1.6" stroke-opacity=".8"/>
+      <circle cx="${f(r.ax)}" cy="${f(r.ay)}" r="3.4" fill="${r.color}"/>
+      <circle cx="${badgeX}" cy="${f(r.ly)}" r="12" fill="${r.color}"/>
+      <text x="${badgeX}" y="${f(r.ly)}" text-anchor="middle" dominant-baseline="central" style="font:800 13px var(--font);fill:#fff">${r.letter}</text>
+      <rect x="${pillX0}" y="${f(r.ly - 12)}" width="${pw}" height="24" rx="12" fill="${r.color}"/>
+      <text x="${pillX0 + pw / 2}" y="${f(r.ly)}" text-anchor="middle" dominant-baseline="central" style="font:800 12px var(--font);fill:#fff;letter-spacing:.3px">${_p3Esc(label.toUpperCase())}</text>
+      <text x="${textX}" y="${f(r.ly + 28)}" text-anchor="${isR ? 'start' : 'end'}" style="font:700 14.5px var(--font);fill:var(--text-primary)">${_p3Money(r.value)}</text>
+      <text x="${textX}" y="${f(r.ly + 44)}" text-anchor="${isR ? 'start' : 'end'}" style="font:500 11.5px var(--font);fill:var(--text-secondary)">${_p3Pct(r.pct)}%  ·  ${r.count} expense${r.count !== 1 ? 's' : ''}</text>
+    </g>`;
+  });
+
+  wrap.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;overflow:visible" role="img" aria-label="3D pie chart of expenses by category">
+      <defs>${defs}</defs>
+      <ellipse cx="${cx + 36}" cy="${cy + depth + 24}" rx="${rx * 1.08}" ry="${ry * .95}" fill="rgba(0,0,0,.55)" filter="url(#p3-blur)"/>
+      ${slices}${callouts}
+    </svg>
+    <div id="exp3d-tip" style="position:absolute;display:none;pointer-events:none;z-index:5;background:var(--bg-card-hover);border:1px solid var(--border-light);border-radius:10px;padding:8px 12px;font-size:12px;box-shadow:var(--shadow);white-space:nowrap"></div>`;
+
+  // ── Interaction ──
+  const tip = document.getElementById('exp3d-tip');
+  const sel = () => _expCatFilter && rows.find(r => r.name === _expCatFilter.name);
+  const paint = hoverI => {
+    const s = sel();
+    wrap.querySelectorAll('.p3-slice').forEach(g => {
+      const r = rows[+g.dataset.i], lift = (r.i === hoverI) || (s && s.i === r.i);
+      g.style.transform = `translate(${f(lift ? r.hx : r.dx)}px,${f(lift ? r.hy : r.dy)}px)`;
+      g.style.opacity = (s && s.i !== r.i && r.i !== hoverI) ? .45 : 1;
+    });
+    wrap.querySelectorAll('.p3-call').forEach(g => { g.style.opacity = (s && s.i !== +g.dataset.i && +g.dataset.i !== hoverI) ? .45 : 1; });
+  };
+  const showTip = (i, ev) => {
+    const r = rows[i], box = wrap.getBoundingClientRect();
+    tip.innerHTML = `<div style="font-weight:800;color:${r.color};margin-bottom:2px">${r.letter} · ${_p3Esc(r.name)}</div>
+      <div style="color:var(--text-primary);font-weight:700">${_p3Money(r.value, 2)} <span style="color:var(--text-secondary);font-weight:500">(${_p3Pct(r.pct)}%)</span></div>
+      <div style="color:var(--text-secondary)">${r.count} expense${r.count !== 1 ? 's' : ''} · click to filter the table</div>`;
+    tip.style.display = 'block';
+    let x = ev.clientX - box.left + 14, y = ev.clientY - box.top + 14;
+    if (x + tip.offsetWidth > box.width) x = ev.clientX - box.left - tip.offsetWidth - 14;
+    tip.style.left = Math.max(0, x) + 'px'; tip.style.top = y + 'px';
+  };
+  wrap.querySelectorAll('.p3-slice, .p3-call').forEach(g => {
+    const i = +g.dataset.i;
+    g.addEventListener('mouseenter', () => paint(i));
+    g.addEventListener('mousemove', ev => showTip(i, ev));
+    g.addEventListener('mouseleave', () => { tip.style.display = 'none'; paint(-1); });
+    g.addEventListener('click', () => expToggleCategory(i));
+  });
+  paint(-1);
+}
+
+// One filter drives pie, monthly bars and the table together.
+function expToggleCategory(i) {
+  const r = _expPieRows[i]; if (!r) return;
+  _expCatFilter = (_expCatFilter && _expCatFilter.name === r.name) ? null : { name: r.name, cats: r.cats };
+  _expRefreshViews();
+}
+function _expRefreshViews() {
+  renderExpense3DPie(_expenseCache || []);
+  renderExpenseMonthly(_expenseCache || [], false);
+  renderExpenseTable();
+}
+function clearExpenseFilter() { _expCatFilter = null; _expRefreshViews(); }
+
+// ═══════════════════════════════════════════════════════
+// EXPENSES — MONTHLY 3D STACKED COLUMNS (pure SVG)
+// Each month is one extruded column stacked by category, using the SAME
+// colours/letters as the 3D pie so the two charts read side by side.
+// ═══════════════════════════════════════════════════════
+function _p3Compact(n) {
+  n = Number(n);
+  if (n >= 1e6) return (n / 1e6).toFixed(n % 1e6 ? 1 : 0).replace(/\.0$/, '') + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(n % 1e3 ? 1 : 0).replace(/\.0$/, '') + 'k';
+  return String(Math.round(n));
+}
+function _p3NiceMax(v) {                       // axis top + step giving ~4-6 clean ticks
+  const raw = v / 5, mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(st => st >= raw) || mag * 10;
+  return { step, max: Math.ceil(v / step) * step };
+}
+
+function renderExpenseMonthly(expenses, animate) {
+  const wrap = document.getElementById('exp-month-wrap');
+  if (!wrap) return;
+  const rows = _expPieRows || [];
+  const rowOf = {};
+  rows.forEach(r => r.cats.forEach(c => { rowOf[c] = r; }));
+
+  // month → { rowIndex → amount }
+  const byMonth = {};
+  expenses.forEach(e => {
+    const m = (e.expense_date || '').slice(0, 7), r = rowOf[e.category_name || 'Uncategorized'];
+    if (!m || !r) return;
+    (byMonth[m] = byMonth[m] || {})[r.i] = ((byMonth[m] || {})[r.i] || 0) + Number(e.amount || 0);
+  });
+  const months = Object.keys(byMonth).sort().slice(-12);
+  if (!months.length) {
+    wrap.innerHTML = '<div style="height:240px;display:flex;align-items:center;justify-content:center;color:var(--text-secondary);font-size:13px">No expenses yet — add one to see the monthly trend.</div>';
+    return;
+  }
+  const monthTotal = m => Object.values(byMonth[m]).reduce((a, b) => a + b, 0);
+  const peak = Math.max(...months.map(monthTotal));
+  const { step, max } = _p3NiceMax(peak);
+
+  // ── Geometry (same box as the pie so both cards line up) ──
+  const W = 720, H = 440, L = 58, R = 22, T = 46, B = 62, DX = 15, DY = -9;
+  const yBot = H - B, ph = yBot - T, plotW = W - L - R - DX;
+  const slot = plotW / months.length, bw = Math.min(74, slot * .56);
+  // Every non-zero category keeps at least MINPX of height so tiny amounts stay
+  // visible; the scale is tightened until the tallest (boosted) column still fits.
+  const MINPX = 9;
+  const segPx = (v, sc) => Math.max(v * sc, MINPX);
+  let sc = ph / max;
+  for (let k = 0; k < 6; k++) {
+    const tallest = Math.max(...months.map(m => Object.values(byMonth[m]).reduce((t, v) => t + (v > 0 ? segPx(v, sc) : 0), 0)));
+    if (tallest <= ph + .5) break;
+    sc *= ph / tallest * .995;
+  }
+  const f = n => n.toFixed(1);
+  const sel = _expCatFilter && rows.find(r => r.name === _expCatFilter.name);
+  const MN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  let defs = '<filter id="m3-blur" x="-50%" y="-200%" width="200%" height="500%"><feGaussianBlur stdDeviation="5"/></filter>';
+  rows.forEach(r => { defs += `<linearGradient id="m3f${r.i}" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="${_p3Shade(r.color, .2)}"/><stop offset="1" stop-color="${_p3Shade(r.color, -.08)}"/></linearGradient>`; });
+
+  // grid + y axis
+  let grid = `<polygon points="${L},${yBot} ${L + plotW},${yBot} ${L + plotW + DX},${yBot + DY} ${L + DX},${yBot + DY}" fill="var(--border)" fill-opacity=".35"/>`;
+  for (let v = 0; v <= max + 1e-9; v += step) {
+    const y = yBot - v * sc;
+    grid += `<line x1="${L + DX}" y1="${f(y + DY)}" x2="${L + plotW + DX}" y2="${f(y + DY)}" stroke="var(--border)" stroke-opacity="${v === 0 ? 0 : .9}" stroke-dasharray="3 5"/>
+      <line x1="${L}" y1="${f(y)}" x2="${L + DX}" y2="${f(y + DY)}" stroke="var(--border)" stroke-opacity=".9"/>
+      <text x="${L - 8}" y="${f(y)}" text-anchor="end" dy="0.35em" style="font:600 11px var(--font);fill:var(--text-secondary)">${_p3Compact(v)}</text>`;
+  }
+
+  // columns
+  let bars = '';
+  months.forEach((m, mi) => {
+    const x = L + slot * mi + (slot - bw) / 2;
+    const [yy, mm] = m.split('-');
+    const lbl = (MN[(+mm) - 1] || mm) + " '" + yy.slice(2);
+    const cats = rows.filter(r => byMonth[m][r.i] > 0);
+    let accPx = 0, segs = '';
+    cats.forEach((r, k) => {
+      const v = byMonth[m][r.i], hPx = segPx(v, sc), y1 = yBot - accPx, y0 = y1 - hPx, last = k === cats.length - 1;
+      const dim = sel && sel.i !== r.i;
+      segs += `<g class="m3-seg" data-i="${r.i}" data-m="${m}" style="cursor:pointer;transition:opacity .25s ease;opacity:${dim ? .35 : 1}">
+        <polygon points="${f(x + bw)},${f(y0)} ${f(x + bw + DX)},${f(y0 + DY)} ${f(x + bw + DX)},${f(y1 + DY)} ${f(x + bw)},${f(y1)}" fill="${_p3Shade(r.color, -.38)}"/>
+        ${last ? `<polygon points="${f(x)},${f(y0)} ${f(x + bw)},${f(y0)} ${f(x + bw + DX)},${f(y0 + DY)} ${f(x + DX)},${f(y0 + DY)}" fill="${_p3Shade(r.color, .32)}"/>` : ''}
+        <rect x="${f(x)}" y="${f(y0)}" width="${f(bw)}" height="${f(Math.max(y1 - y0, .5))}" fill="url(#m3f${r.i})" stroke="rgba(255,255,255,.28)" stroke-width="1"/>
+        ${(y1 - y0) >= 16 && bw >= 34 ? `<text x="${f(x + bw / 2)}" y="${f((y0 + y1) / 2)}" text-anchor="middle" dy="0.35em" style="font:800 11px var(--font);fill:#fff;pointer-events:none;paint-order:stroke;stroke:rgba(0,0,0,.25);stroke-width:2px">${r.letter}</text>` : ''}
+      </g>`;
+      accPx += hPx;
+    });
+    const tot = monthTotal(m), topY = yBot - accPx;
+    bars += `<g class="m3-bar" style="${animate ? `animation:m3rise .55s cubic-bezier(.2,.8,.2,1) ${mi * 70}ms both` : ''}">
+      <ellipse cx="${f(x + bw / 2 + DX / 2 + 6)}" cy="${f(yBot + 2)}" rx="${f(bw * .75)}" ry="6" fill="rgba(0,0,0,.4)" filter="url(#m3-blur)"/>
+      ${segs}
+      <text x="${f(x + bw / 2 + DX / 2)}" y="${f(topY + DY - 9)}" text-anchor="middle" style="font:800 12px var(--font);fill:var(--text-primary)">${_p3Compact(tot)}</text>
+    </g>
+    <text x="${f(x + bw / 2 + DX / 2)}" y="${yBot + 24}" text-anchor="middle" style="font:700 12px var(--font);fill:var(--text-secondary)">${lbl}</text>`;
+  });
+
+  // legend — same letters/colours as the pie call-outs
+  const legend = rows.map(r => {
+    const dim = sel && sel.i !== r.i;
+    return `<span class="m3-leg" data-i="${r.i}" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;font-weight:600;color:var(--text-secondary);opacity:${dim ? .4 : 1};transition:opacity .2s">
+      <span style="width:16px;height:16px;border-radius:50%;background:${r.color};color:#fff;font-size:10px;font-weight:800;display:inline-flex;align-items:center;justify-content:center">${r.letter}</span>${_p3Esc(r.name)}</span>`;
+  }).join('');
+
+  wrap.innerHTML = `
+    <style>@keyframes m3rise{from{transform:translateY(26px);opacity:0}to{transform:none;opacity:1}}</style>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;overflow:visible" role="img" aria-label="3D stacked monthly expenses chart">
+      <defs>${defs}</defs>${grid}${bars}
+    </svg>
+    <div style="display:flex;flex-wrap:wrap;gap:8px 16px;justify-content:center;margin-top:6px">${legend}</div>
+    <div id="exp-month-tip" style="position:absolute;display:none;pointer-events:none;z-index:5;background:var(--bg-card-hover);border:1px solid var(--border-light);border-radius:10px;padding:8px 12px;font-size:12px;box-shadow:var(--shadow);white-space:nowrap"></div>`;
+
+  // interaction
+  const tip = document.getElementById('exp-month-tip');
+  wrap.querySelectorAll('.m3-seg').forEach(g => {
+    const r = rows[+g.dataset.i], m = g.dataset.m;
+    const show = ev => {
+      const box = wrap.getBoundingClientRect(), v = byMonth[m][r.i], tot = monthTotal(m);
+      const [yy, mm] = m.split('-');
+      tip.innerHTML = `<div style="font-weight:800;color:${r.color};margin-bottom:2px">${r.letter} · ${_p3Esc(r.name)}</div>
+        <div style="color:var(--text-primary);font-weight:700">${_p3Money(v, 2)} <span style="color:var(--text-secondary);font-weight:500">in ${MN[(+mm) - 1]} ${yy}</span></div>
+        <div style="color:var(--text-secondary)">Month total ${_p3Money(tot, 2)} · click to filter</div>`;
+      tip.style.display = 'block';
+      let x = ev.clientX - box.left + 14; if (x + tip.offsetWidth > box.width) x = ev.clientX - box.left - tip.offsetWidth - 14;
+      tip.style.left = Math.max(0, x) + 'px'; tip.style.top = (ev.clientY - box.top + 14) + 'px';
+    };
+    g.addEventListener('mouseenter', () => { if (!sel) wrap.querySelectorAll('.m3-seg').forEach(o => { o.style.opacity = o === g || o.dataset.i === g.dataset.i ? 1 : .4; }); });
+    g.addEventListener('mousemove', show);
+    g.addEventListener('mouseleave', () => { tip.style.display = 'none'; if (!sel) wrap.querySelectorAll('.m3-seg').forEach(o => { o.style.opacity = 1; }); });
+    g.addEventListener('click', () => expToggleCategory(r.i));
+  });
+  wrap.querySelectorAll('.m3-leg').forEach(el => el.addEventListener('click', () => expToggleCategory(+el.dataset.i)));
+}
+
+function renderExpenseTable() {
+  const list = _expCatFilter ? _expenseCache.filter(e => _expCatFilter.cats.includes(e.category_name || 'Uncategorized')) : _expenseCache;
+  document.getElementById('expenses-table').innerHTML = list.map(e=>`
+    <tr>
+      <td>${e.expense_date}</td>
+      <td><span class="badge badge-blue">${e.category_name}</span></td>
+      <td>${e.description || e.title}</td>
+      <td class="fw-700 text-red">Rs.${Number(e.amount).toFixed(2)}</td>
+      <td>
+        <div class="flex-gap">
+          <button class="btn btn-ghost btn-xs" onclick="editExpense(${e.id})"><i class="fa fa-edit"></i></button>
+          <button class="btn btn-ghost btn-xs" onclick="deleteExpense(${e.id})" style="color:var(--red)"><i class="fa fa-trash"></i></button>
+        </div>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:18px">No expenses to show.</td></tr>';
+  const chip = document.getElementById('exp-filter-chip');
+  if (chip) {
+    if (_expCatFilter) {
+      const sum = list.reduce((s, e) => s + Number(e.amount || 0), 0);
+      chip.style.display = 'flex';
+      chip.innerHTML = `<span>Showing <strong>${_p3Esc(_expCatFilter.name)}</strong> — ${list.length} expense${list.length !== 1 ? 's' : ''}, ${_p3Money(sum, 2)}</span>
+        <button class="btn btn-ghost btn-xs" onclick="clearExpenseFilter()"><i class="fa fa-times"></i> Clear filter</button>`;
+    } else chip.style.display = 'none';
+  }
+}
+
+async function renderExpenses() {
+  const data = await ExpensesAPI.list({ page_size: 500 });
+  _expenseCache = data.results || data;
+  // A selected slice that no longer exists (expense edited/deleted) is dropped.
+  if (_expCatFilter && !_expenseCache.some(e => _expCatFilter.cats.includes(e.category_name || 'Uncategorized'))) _expCatFilter = null;
+  renderExpenseTable();
+  renderExpense3DPie(_expenseCache);
+
+  renderExpenseMonthly(_expenseCache, true);
+}
+
+function openExpenseModal() {
+  document.getElementById('exp-modal-title').textContent='Add Expense';
+  document.getElementById('exp-edit-id').value='';
+  document.getElementById('exp-amount').value='';
+  document.getElementById('exp-date').value=new Date().toISOString().split('T')[0];
+  document.getElementById('exp-desc').value='';
+  document.getElementById('exp-ref').value='';
+  document.getElementById('exp-cat').value='';
+  _loadExpenseCategoryOptions();
+  openModal('expense-modal');
+}
+
+function editExpense(id) {
+  const e=_expenseCache.find(x=>x.id===id);
+  if (!e) return;
+  document.getElementById('exp-modal-title').textContent='Edit Expense';
+  document.getElementById('exp-edit-id').value=e.id;
+  document.getElementById('exp-cat').value=e.category_name;
+  document.getElementById('exp-amount').value=e.amount;
+  document.getElementById('exp-date').value=e.expense_date;
+  document.getElementById('exp-desc').value=e.description || '';
+  document.getElementById('exp-ref').value='';
+  _loadExpenseCategoryOptions();
+  openModal('expense-modal');
+}
+
+async function saveExpense() {
+  const amount=parseFloat(document.getElementById('exp-amount').value);
+  if(!amount) { toast('Amount required!','error'); return; }
+  const editId=parseInt(document.getElementById('exp-edit-id').value);
+  const categoryName = document.getElementById('exp-cat').value.trim();
+  if (!categoryName) { toast('Category required!', 'error'); return; }
+  const description = document.getElementById('exp-desc').value;
+  const ref = document.getElementById('exp-ref').value;
+
+  try {
+    const categoryId = await _findOrCreateExpenseCategory(categoryName);
+    const payload = {
+      category: categoryId,
+      title: (description || categoryName).slice(0,200),
+      description: description + (ref ? ` (Ref: ${ref})` : ''),
+      amount,
+      expense_date: document.getElementById('exp-date').value,
+    };
+    if (editId) {
+      await ExpensesAPI.update(editId, payload);
+      toastDone('update', 'Expense', description || categoryName);
+    } else {
+      await ExpensesAPI.create(payload);
+      toastDone('add', 'Expense', description || categoryName);
+    }
+    closeModal('expense-modal');
+    renderExpenses();
+  } catch (err) {
+    toast(err.message || 'Failed to save expense', 'error');
+  }
+}
+
+async function deleteExpense(id) {
+  if (!(await confirmModal('This expense record will be permanently removed.', { title: 'Delete Expense?', confirmText: 'Delete Expense' }))) return;
+  try {
+    await ExpensesAPI.remove(id);
+    renderExpenses();
+    toastDone('delete', 'Expense');
+  } catch (err) {
+    toast(err.message || 'Failed to delete expense', 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// ACCOUNTING
+// ═══════════════════════════════════════════════════════
+function renderAccounting() {
+  const totalSales = DB.orders.filter(o=>o.status==='Completed').reduce((a,o)=>a+o.total,0) + 28500;
+  const totalExpenses = DB.expenses.reduce((a,e)=>a+e.amount,0);
+  const profit = totalSales - totalExpenses;
+  const outstanding = DB.suppliers.reduce((a,s)=>a+Math.abs(Math.min(s.balance,0)),0);
+  document.getElementById('acc-income').textContent = 'Rs.'+totalSales.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+  document.getElementById('acc-expenses').textContent = 'Rs.'+totalExpenses.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+  document.getElementById('acc-profit').textContent = 'Rs.'+profit.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+  document.getElementById('acc-outstanding').textContent = 'Rs.'+outstanding.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+
+  DB.ledger = DB.ledger || [];
+  const sampleLedger = [
+    { date:'2025-01-17 09:15', type:'Sale', ref:'INV-0042', desc:'Sale to Ahmed Hassan', debit:0, credit:4.86, balance:28504.86 },
+    { date:'2025-01-17 08:50', type:'Sale', ref:'INV-0041', desc:'Sale to Walk-in', debit:0, credit:2.00, balance:28500.00 },
+    { date:'2025-01-10 10:00', type:'Purchase', ref:'PO-0001', desc:'Purchase from Beverage Dist.', debit:50.00, credit:0, balance:28498.00 },
+    { date:'2025-01-05 12:00', type:'Expense', ref:'EXP-002', desc:'Electricity Bill', debit:350.00, credit:0, balance:28548.00 },
+    { date:'2025-01-01 09:00', type:'Expense', ref:'EXP-001', desc:'Monthly Rent', debit:2500.00, credit:0, balance:28898.00 },
+  ];
+  const allLedger = [...DB.ledger, ...sampleLedger];
+  document.getElementById('ledger-table').innerHTML = allLedger.map(l=>`
+    <tr>
+      <td style="font-size:12px">${l.date}</td>
+      <td><span class="badge ${l.type==='Sale'?'badge-green':l.type==='Expense'?'badge-red':'badge-blue'}">${l.type}</span></td>
+      <td class="td-mono">${l.ref}</td>
+      <td>${l.desc}</td>
+      <td class="text-red">${l.debit>0?'Rs.'+l.debit.toFixed(2):'—'}</td>
+      <td class="text-green">${l.credit>0?'Rs.'+l.credit.toFixed(2):'—'}</td>
+      <td class="fw-700">Rs.${l.balance.toFixed(2)}</td>
+    </tr>`).join('');
+}
+
+// ═══════════════════════════════════════════════════════
+// REPORTS
+// ═══════════════════════════════════════════════════════
+let _reportColumnsCache = [];    // every column the currently loaded report returned
+let _reportVisibleColumns = [];  // same, minus whatever the user hid in Report Settings
+let _reportHasTotalRow = false;  // whether the last-loaded report actually returned a TOTAL row
+
+// Per-report-type column visibility, kept on this device only — same pattern
+// as the existing Stock Report print settings. Lets each report show only
+// the fields that matter for how this business uses it (e.g. hide Discount
+// on a store that never discounts) without touching what the backend sends.
+const _REPORT_PREFS_KEY = 'smartretail_report_col_prefs';
+
+function _isTotalRow(row, columns) {
+  if (!row || !columns.length) return false;
+  // Check every column, not just the first — different reports label their
+  // Total row in different columns (Sales uses "date", Inventory uses
+  // "product" since "sku" comes first but is often hidden), so this stays
+  // correct regardless of which column carries the "TOTAL" marker or
+  // whether that column happens to be hidden by Report Settings.
+  return columns.some(c => String(row[c] ?? '').trim().toUpperCase() === 'TOTAL');
+}
+
+function _reportColumnPrefs(slug) {
+  try { return JSON.parse(localStorage.getItem(_REPORT_PREFS_KEY) || '{}')[slug] || {}; }
+  catch (e) { return {}; }
+}
+
+function _visibleReportColumns(slug, columns) {
+  const prefs = _reportColumnPrefs(slug);
+  // A column is hidden only if the user explicitly unchecked it (prefs[key] === false);
+  // anything never configured, or any brand-new column the backend adds later, stays visible.
+  const visible = columns.filter(c => prefs[c] !== false);
+  return visible.length ? visible : columns; // never let settings hide every single column
+}
+
+function openReportSettings() {
+  const slug = _currentReportSlug || 'sales';
+  const titleMap = {
+    sales: 'Sales Report', inventory: 'Inventory Report', purchase: 'Purchase Report',
+    expenses: 'Expense Report', profit: 'Profit & Loss Report', customers: 'Customer Report',
+    suppliers: 'Supplier Report', tax: 'Tax Report',
+  };
+  document.getElementById('report-settings-name').textContent = titleMap[slug] || 'Report';
+
+  if (slug === 'profit') {
+    document.getElementById('report-settings-list').innerHTML =
+      `<p style="font-size:12px;color:var(--text-muted)">Profit &amp; Loss has a fixed statement layout and has no optional columns to toggle.</p>`;
+    openModal('report-settings-modal');
+    return;
+  }
+
+  const columns = _reportColumnsCache && _reportColumnsCache.length
+    ? _reportColumnsCache
+    : Array.from(document.querySelectorAll('#report-table-head th')).map(th => th.dataset.col).filter(Boolean);
+
+  if (!columns.length) {
+    document.getElementById('report-settings-list').innerHTML =
+      `<p style="font-size:12px;color:var(--text-muted)">Generate this report at least once so its columns are known, then reopen Report Settings.</p>`;
+    openModal('report-settings-modal');
+    return;
+  }
+
+  const prefs = _reportColumnPrefs(slug);
+
+  const totalToggleHtml = _reportHasTotalRow ? `
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;padding-bottom:10px;margin-bottom:6px;border-bottom:1px solid var(--border);font-weight:700">
+      <input type="checkbox" id="report-total-toggle" ${prefs._showTotal === false ? '' : 'checked'}> Show TOTAL row at the end
+    </label>` : '';
+
+  document.getElementById('report-settings-list').innerHTML = totalToggleHtml + columns.map(c => `
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
+      <input type="checkbox" class="report-col-check" value="${c}" ${prefs[c] === false ? '' : 'checked'}> ${_fmtColLabel(c)}
+    </label>`).join('');
+
+  openModal('report-settings-modal');
+}
+
+function saveReportSettings() {
+  const slug = _currentReportSlug || 'sales';
+  const checks = document.querySelectorAll('#report-settings-list .report-col-check');
+
+  const allPrefs = (() => {
+    try { return JSON.parse(localStorage.getItem(_REPORT_PREFS_KEY) || '{}'); }
+    catch (e) { return {}; }
+  })();
+  const slugPrefs = {};
+  checks.forEach(chk => { slugPrefs[chk.value] = chk.checked; });
+  const totalToggle = document.getElementById('report-total-toggle');
+  if (totalToggle) slugPrefs._showTotal = totalToggle.checked;
+  allPrefs[slug] = slugPrefs;
+
+  try {
+    localStorage.setItem(_REPORT_PREFS_KEY, JSON.stringify(allPrefs));
+    closeModal('report-settings-modal');
+    toast('Report settings saved', 'success');
+    generateReport();
+  } catch (e) {
+    toast('Could not save settings on this device', 'error');
+  }
+}
+
+function _reportDateParams() {
+  const from = document.getElementById('rpt-from')?.value;
+  const to = document.getElementById('rpt-to')?.value;
+  const params = {};
+  if (from) params.date_from = from;
+  if (to) params.date_to = to;
+  return params;
+}
+
+// ═══════════════════════════════════════════════════════
+// REPORTS — MODERN MONTHLY SALES TREND (pure SVG)
+// Smooth gradient area, glowing line, peak marker, hover guide + tooltip,
+// and KPI chips (total / best month / change vs last month).
+// ═══════════════════════════════════════════════════════
+function renderRptSalesTrend(series) {
+  const wrap = document.getElementById('rpt-sales-wrap');
+  if (!wrap) return;
+  const MN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const monthly = {};
+  (series || []).forEach(s => {
+    const m = (s.day || '').slice(0, 7);
+    if (m) monthly[m] = (monthly[m] || 0) + Number(s.total || 0);
+  });
+  let keys = Object.keys(monthly).sort();
+  if (!keys.length) {
+    wrap.innerHTML = '<div style="height:240px;display:flex;align-items:center;justify-content:center;color:var(--text-secondary);font-size:13px">No sales in this period yet.</div>';
+    return;
+  }
+  // fill months with no sales so the trend is honest (a gap = Rs.0, not skipped)
+  const months = [];
+  let [y, mo] = keys[0].split('-').map(Number);
+  const [ey, em] = keys[keys.length - 1].split('-').map(Number);
+  while (y < ey || (y === ey && mo <= em)) { months.push(y + '-' + String(mo).padStart(2, '0')); if (++mo > 12) { mo = 1; y++; } }
+  const vals = months.map(m => monthly[m] || 0);
+  const n = months.length;
+  const label = m => { const [yy, mm] = m.split('-'); return MN[+mm - 1] + " '" + yy.slice(2); };
+  const longLabel = m => { const [yy, mm] = m.split('-'); return MN[+mm - 1] + ' ' + yy; };
+
+  const total = vals.reduce((a, b) => a + b, 0);
+  const peakVal = Math.max(...vals), peakIdx = vals.indexOf(peakVal);
+  const last = vals[n - 1], prev = n > 1 ? vals[n - 2] : null;
+  const chg = prev === null ? null : (prev > 0 ? (last - prev) / prev * 100 : (last > 0 ? 100 : 0));
+
+  // geometry
+  const W = 720, H = 290, L = 54, R = 26, T = 34, B = 40;
+  const yBot = H - B, ph = yBot - T, pw = W - L - R;
+  const { step, max } = _p3NiceMax(peakVal || 1);
+  const X = i => n === 1 ? L + pw / 2 : L + pw * i / (n - 1);
+  const Y = v => yBot - v / max * ph;
+  const f = k => k.toFixed(1);
+  const pts = vals.map((v, i) => [X(i), Y(v)]);
+
+  // smooth (no-overshoot) curve: horizontal tangents at every point
+  let line = `M${f(pts[0][0])},${f(pts[0][1])}`;
+  for (let i = 1; i < n; i++) {
+    const [x0, y0] = pts[i - 1], [x1, y1] = pts[i], xm = (x0 + x1) / 2;
+    line += ` C${f(xm)},${f(y0)} ${f(xm)},${f(y1)} ${f(x1)},${f(y1)}`;
+  }
+  const area = n === 1
+    ? `M${f(pts[0][0] - 60)},${yBot} L${f(pts[0][0] - 60)},${f(pts[0][1])} L${f(pts[0][0] + 60)},${f(pts[0][1])} L${f(pts[0][0] + 60)},${yBot} Z`
+    : `${line} L${f(pts[n - 1][0])},${yBot} L${f(pts[0][0])},${yBot} Z`;
+
+  let grid = '';
+  for (let v = 0; v <= max + 1e-9; v += step) {
+    const yy = Y(v);
+    grid += `<line x1="${L}" y1="${f(yy)}" x2="${W - R}" y2="${f(yy)}" stroke="var(--border)" stroke-opacity="${v === 0 ? 1 : .8}" ${v === 0 ? '' : 'stroke-dasharray="3 5"'}/>
+      <text x="${L - 9}" y="${f(yy)}" text-anchor="end" dy="0.35em" style="font:600 11px var(--font);fill:var(--text-secondary)">${_p3Compact(v)}</text>`;
+  }
+  const showEvery = Math.ceil(n / 8);
+  let xl = '', dots = '', hits = '';
+  const colW = n === 1 ? pw : pw / (n - 1);
+  vals.forEach((v, i) => {
+    const [px, py] = pts[i];
+    if (i % showEvery === 0 || i === n - 1) xl += `<text x="${f(px)}" y="${yBot + 24}" text-anchor="middle" style="font:700 12px var(--font);fill:var(--text-secondary)">${label(months[i])}</text>`;
+    const isLast = i === n - 1;
+    dots += `<g class="rs-dot" data-i="${i}">
+      ${isLast ? `<circle cx="${f(px)}" cy="${f(py)}" r="9" fill="#00a9a5" opacity=".25" style="animation:rsPulse 1.8s ease-out infinite;transform-origin:${f(px)}px ${f(py)}px"/>` : ''}
+      <circle class="rs-pt" cx="${f(px)}" cy="${f(py)}" r="${isLast ? 5.5 : 4.5}" fill="#fff" stroke="#00a9a5" stroke-width="2.6" style="transition:r .15s"/></g>`;
+    hits += `<rect class="rs-hit" data-i="${i}" x="${f(px - colW / 2)}" y="${T - 14}" width="${f(colW)}" height="${ph + 14}" fill="transparent" style="cursor:crosshair"/>`;
+  });
+  const peakX = pts[peakIdx][0], peakY = pts[peakIdx][1];
+  const pill = `Peak ${_p3Compact(peakVal)}`, pillW = pill.length * 7 + 18;
+  const peakTag = n > 1 && peakVal > 0 ? `<g transform="translate(${f(Math.min(Math.max(peakX, L + pillW / 2), W - R - pillW / 2))},${f(peakY - 24)})">
+      <rect x="${-pillW / 2}" y="-11" width="${pillW}" height="22" rx="11" fill="#00a9a5"/>
+      <path d="M-5,11 L0,17 L5,11 Z" fill="#00a9a5" transform="translate(${f(peakX - Math.min(Math.max(peakX, L + pillW / 2), W - R - pillW / 2))},0)"/>
+      <text x="0" y="0" text-anchor="middle" dy="0.35em" style="font:800 11.5px var(--font);fill:#fff">${pill}</text></g>` : '';
+
+  const chip = (t, v, sub, col) => `<div style="flex:1;min-width:120px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;padding:9px 12px">
+      <div style="font-size:10.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--text-secondary)">${t}</div>
+      <div style="font-size:16px;font-weight:800;color:${col || 'var(--text-primary)'};margin-top:2px">${v}</div>
+      <div style="font-size:11px;color:var(--text-secondary)">${sub}</div></div>`;
+  const chgTxt = chg === null ? '—' : (chg >= 0 ? '▲ ' : '▼ ') + Math.min(Math.abs(chg), 9999).toFixed(1) + '%';
+  const chips = `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+    ${chip('Total revenue', _p3Money(total), n + ' month' + (n !== 1 ? 's' : ''), '#00a9a5')}
+    ${chip('Best month', _p3Money(peakVal), longLabel(months[peakIdx]))}
+    ${chip('Last vs previous', chgTxt, chg === null ? 'only one month so far' : label(months[n - 2]) + ' → ' + label(months[n - 1]), chg === null ? '' : (chg >= 0 ? 'var(--green)' : 'var(--red)'))}
+  </div>`;
+
+  wrap.innerHTML = `${chips}
+    <style>@keyframes rsPulse{0%{transform:scale(.6);opacity:.5}100%{transform:scale(1.9);opacity:0}}
+      @keyframes rsDraw{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+      @keyframes rsFade{from{opacity:0}to{opacity:1}}</style>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;overflow:visible" role="img" aria-label="Monthly sales trend">
+      <defs>
+        <linearGradient id="rs-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#00a9a5" stop-opacity=".38"/><stop offset="1" stop-color="#00a9a5" stop-opacity="0"/></linearGradient>
+        <linearGradient id="rs-stroke" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#36d1c4"/><stop offset="1" stop-color="#00a9a5"/></linearGradient>
+        <filter id="rs-glow" x="-10%" y="-40%" width="120%" height="180%"><feGaussianBlur stdDeviation="5"/></filter>
+      </defs>
+      ${grid}${xl}
+      <path d="${area}" fill="url(#rs-fill)" style="animation:rsFade .9s ease both"/>
+      ${n > 1 ? `<path d="${line}" fill="none" stroke="#00a9a5" stroke-width="7" stroke-opacity=".35" filter="url(#rs-glow)" stroke-linecap="round"/>
+      <path d="${line}" fill="none" stroke="url(#rs-stroke)" stroke-width="3.2" stroke-linecap="round" pathLength="1" stroke-dasharray="1" style="animation:rsDraw 1s ease-out both"/>` : ''}
+      <line id="rs-guide" x1="0" y1="${T - 6}" x2="0" y2="${yBot}" stroke="#00a9a5" stroke-opacity=".55" stroke-dasharray="4 4" style="display:none"/>
+      ${dots}${peakTag}${hits}
+    </svg>
+    <div id="rs-tip" style="position:absolute;display:none;pointer-events:none;z-index:5;background:var(--bg-card-hover);border:1px solid var(--border-light);border-radius:10px;padding:8px 12px;font-size:12px;box-shadow:var(--shadow);white-space:nowrap"></div>`;
+
+  const tip = document.getElementById('rs-tip'), guide = document.getElementById('rs-guide');
+  const svg = wrap.querySelector('svg');
+  wrap.querySelectorAll('.rs-hit').forEach(h => {
+    const i = +h.dataset.i;
+    const move = ev => {
+      const box = wrap.getBoundingClientRect(), v = vals[i], p = i > 0 ? vals[i - 1] : null;
+      const d = p === null ? null : (p > 0 ? (v - p) / p * 100 : (v > 0 ? 100 : 0));
+      tip.innerHTML = `<div style="font-weight:800;color:#00a9a5;margin-bottom:2px">${longLabel(months[i])}</div>
+        <div style="color:var(--text-primary);font-weight:700">${_p3Money(v, 2)}</div>
+        <div style="color:${d === null ? 'var(--text-secondary)' : d >= 0 ? 'var(--green)' : 'var(--red)'}">${d === null ? 'First month' : (d >= 0 ? '▲ ' : '▼ ') + Math.min(Math.abs(d), 9999).toFixed(1) + '% vs ' + label(months[i - 1])}</div>`;
+      tip.style.display = 'block';
+      let x = ev.clientX - box.left + 14; if (x + tip.offsetWidth > box.width) x = ev.clientX - box.left - tip.offsetWidth - 14;
+      tip.style.left = Math.max(0, x) + 'px'; tip.style.top = Math.max(0, ev.clientY - box.top - 60) + 'px';
+    };
+    h.addEventListener('mouseenter', () => {
+      guide.setAttribute('x1', pts[i][0]); guide.setAttribute('x2', pts[i][0]); guide.style.display = '';
+      wrap.querySelectorAll('.rs-pt').forEach((c, k) => c.setAttribute('r', k === i ? 7 : (k === n - 1 ? 5.5 : 4.5)));
+    });
+    h.addEventListener('mousemove', move);
+    h.addEventListener('mouseleave', () => {
+      tip.style.display = 'none'; guide.style.display = 'none';
+      wrap.querySelectorAll('.rs-pt').forEach((c, k) => c.setAttribute('r', k === n - 1 ? 5.5 : 4.5));
+    });
+  });
+}
+
+// ═══════════════════════════════════════════════════════
+// REPORTS — PROFIT & LOSS as compact stat cards
+// ═══════════════════════════════════════════════════════
+function renderPLCards(pl) {
+  const income = Number(pl.income) || 0, expenses = Number(pl.expenses) || 0;
+  const cogs = Number(pl.cost_of_goods_sold) || 0, net = Number(pl.net_profit) || 0;
+  const gross = income - cogs;
+  const money = v => (v < 0 ? '-' : '') + 'Rs.' + Math.abs(v).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const margin = income > 0 ? net / income * 100 : null;
+  const marginTxt = margin === null ? 'n/a' : (Math.abs(margin) > 999 ? (margin < 0 ? '< -999%' : '> 999%') : margin.toFixed(1) + '%');
+
+  const card = (icon, color, glow, title, value, sub) => `
+    <div class="pl-card" style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:14px;padding:12px 14px;display:flex;gap:11px;align-items:center;transition:transform .18s ease, box-shadow .18s ease;min-width:0"
+         onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 20px rgba(0,0,0,.16)'" onmouseout="this.style.transform='';this.style.boxShadow=''">
+      <div style="flex:none;width:38px;height:38px;border-radius:11px;background:${glow};color:${color};display:flex;align-items:center;justify-content:center;font-size:16px"><i class="fa ${icon}"></i></div>
+      <div style="min-width:0">
+        <div style="font-size:10.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--text-secondary)">${title}</div>
+        <div style="font-size:17px;font-weight:800;color:${color};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${value}</div>
+        <div style="font-size:11px;color:var(--text-secondary)">${sub}</div>
+      </div>
+    </div>`;
+
+  const profit = net >= 0, nc = profit ? 'var(--green)' : 'var(--red)', ng = profit ? 'var(--green-glow)' : 'var(--red-glow)';
+  document.getElementById('pl-summary').innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">
+      ${card('fa-chart-line', 'var(--green)', 'var(--green-glow)', 'Total Income', money(income), 'Sales received')}
+      ${card('fa-wallet', 'var(--red)', 'var(--red-glow)', 'Total Expenses', money(expenses), 'Operating costs')}
+      ${card('fa-boxes', 'var(--accent)', 'var(--accent-glow)', 'Cost of Goods', money(cogs), 'Cost of items sold')}
+      ${card('fa-coins', gross >= 0 ? 'var(--cyan)' : 'var(--red)', gross >= 0 ? 'rgba(6,182,212,.15)' : 'var(--red-glow)', 'Gross Profit', money(gross), 'Income − cost of goods')}
+      <div style="grid-column:1/-1;background:linear-gradient(135deg,${ng},transparent);border:1px solid ${profit ? 'rgba(16,185,129,.35)' : 'rgba(239,68,68,.35)'};border-radius:16px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:12px;min-width:0">
+          <div style="flex:none;width:46px;height:46px;border-radius:13px;background:${nc};color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px"><i class="fa ${profit ? 'fa-trophy' : 'fa-arrow-trend-down'}"></i></div>
+          <div>
+            <div style="font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--text-secondary)">${profit ? 'Net Profit' : 'Net Loss'}</div>
+            <div style="font-size:24px;font-weight:900;color:${nc};line-height:1.15">${money(net)}</div>
+          </div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:10.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--text-secondary)">Profit margin</div>
+          <div style="display:inline-block;margin-top:3px;padding:4px 12px;border-radius:999px;background:${ng};color:${nc};font-size:14px;font-weight:800">${marginTxt}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function renderReports() {
+  // Real 6-month revenue/profit trend from the backend's daily sales chart,
+  // rolled up into monthly buckets for this line chart.
+  if (charts.rptSales) { charts.rptSales.destroy(); charts.rptSales = null; }
+  let series = [];
+  try {
+    const chartData = await DashboardAPI.salesChart(180);
+    series = chartData.series || [];
+  } catch (_) { /* manager+ only — leave empty for other roles */ }
+  renderRptSalesTrend(series);
+
+  // Real Profit & Loss summary
+  try {
+    const pl = await FinanceAPI.profitLoss(_reportDateParams());
+    renderPLCards(pl);
+  } catch (_) {
+    document.getElementById('pl-summary').innerHTML = '<div style="color:var(--text-muted);font-size:13px">Manager access required to view P&L</div>';
+  }
+
+  await generateReport();
+  await renderProductBubbleChart();
+}
+
+// Product Performance bubble chart — Price (x) vs Stock Quantity (y), with
+// bubble size showing Stock Value (price × quantity), so slow-moving
+// expensive stock and fast-moving cheap stock are both visible at a glance
+// rather than buried in a table.
+async function renderProductBubbleChart() {
+  const bc = document.getElementById('productBubbleChart');
+  if (!bc || typeof CanvasJS === 'undefined') return;
+
+  const [prodData, stockData] = await Promise.all([
+    ProductsAPI.list({ page_size: 500 }),
+    InventoryAPI.stockItems({ page_size: 1000 }),
+  ]);
+  const products = prodData.results || prodData;
+  const stockByProduct = {};
+  (stockData.results || stockData).forEach(si => {
+    stockByProduct[si.product] = (stockByProduct[si.product] || 0) + Number(si.quantity);
+  });
+
+  const palette = CHART_PALETTE;
+  const dataPoints = products
+    .map((p, i) => {
+      const qty = stockByProduct[p.id] || 0;
+      const price = Number(p.selling_price ?? p.price ?? 0);
+      return { x: price, y: qty, z: Math.max(price * qty, 1), name: p.name, color: palette[i % palette.length] };
+    })
+    .filter(dp => dp.x > 0 || dp.y > 0)
+    .sort((a, b) => b.z - a.z)
+    .slice(0, 20); // top 20 by stock value — keeps the chart readable
+
+  const ck = _ckTheme();
+  charts.prodBubble = new CanvasJS.Chart('productBubbleChart', {
+    backgroundColor: 'transparent',
+    animationEnabled: true,
+    theme: ck.theme,
+    axisX: {
+      title: 'Unit Price (Rs.)', titleFontColor: ck.text, labelFontColor: ck.text,
+      gridColor: ck.grid, lineColor: ck.grid, tickColor: ck.grid,
+    },
+    axisY: {
+      title: 'Stock Quantity', includeZero: true, titleFontColor: ck.text, labelFontColor: ck.text,
+      gridColor: ck.grid, lineColor: ck.grid, tickColor: ck.grid,
+    },
+    legend: { horizontalAlign: 'left', fontColor: ck.text, fontFamily: "'Plus Jakarta Sans', sans-serif" },
+    data: [{
+      type: 'bubble',
+      showInLegend: true,
+      legendText: 'Bubble size = Stock Value (Rs.)',
+      legendMarkerType: 'circle', legendMarkerColor: CHART_PALETTE[0],
+      toolTipContent: '<b>{name}</b><br/>Price: Rs. {x}<br/>Stock: {y} units<br/>Stock Value: Rs. {z}',
+      dataPoints,
+    }]
+  });
+  charts.prodBubble.render();
+}
+
+// ═══════════════════════════════════════════════════════
+// PROFIT & LOSS STATEMENT (trading-account layout, from POS data)
+// SALES / SALES ADJUSTMENTS / NET SALES / COST OF GOODS SOLD / GROSS PROFIT /
+// OTHER INCOMES / EXPENSES / NET PROFIT — amount column + % of total sales.
+// ═══════════════════════════════════════════════════════
+// Query params for the report endpoints (dates + the P&L closing-stock switch).
+function _reportParams(slug) {
+  const params = _reportDateParams();
+  if (slug === 'profit') params.closing_stock = (document.getElementById('rpt-closing')?.checked === false) ? 0 : 1;
+  return params;
+}
+
+// Same rule the backend uses for the amount column's header.
+function _plAmountLabel() {
+  const from = document.getElementById('rpt-from')?.value, to = document.getElementById('rpt-to')?.value;
+  const yr = new Date().getFullYear();
+  if (from === `${yr}-01-01` && (!to || to.slice(0, 4) === String(yr))) return 'This Year';
+  return 'Amount';
+}
+
+function _plStatementHtml(rows, amountLabel, print) {
+  const ink = print ? '#111' : 'var(--text-primary)';
+  const mute = print ? '#555' : 'var(--text-secondary)';
+  const rule = print ? '#222' : 'var(--text-secondary)';
+  const num = 'font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap';
+  const neg = a => String(a).trim().startsWith('-');
+  const body = rows.map(r => {
+    const d = _p3Esc(r.description || '');
+    switch (r.kind) {
+      case 'spacer':
+        return `<tr><td colspan="4" style="height:${print ? 8 : 12}px;padding:0"></td></tr>`;
+      case 'heading':
+      case 'heading_u':
+        return `<tr><td colspan="4" style="padding:3px 0;font-weight:800;letter-spacing:.3px;${r.kind === 'heading_u' ? 'text-decoration:underline;' : ''}">${d}</td></tr>`;
+      case 'line':
+        return `<tr>
+          <td style="padding:3px 0 3px 14px;width:96px;font-family:monospace;font-size:12px;color:${mute}">${_p3Esc(r.code || '')}</td>
+          <td style="padding:3px 8px">${d}</td>
+          <td style="${num};padding:3px 8px;${neg(r.amount) ? 'color:#dc2626' : ''}">${r.amount}</td>
+          <td style="${num};padding:3px 0 3px 8px;width:72px;color:${mute}">${r.percent}</td></tr>`;
+      case 'subtotal':
+        return `<tr><td></td><td></td>
+          <td style="${num};padding:3px 8px;border-top:1px solid ${rule}">${r.amount}</td>
+          <td style="${num};padding:3px 0 3px 8px;border-top:1px solid ${rule};color:${mute}">${r.percent}</td></tr>`;
+      case 'total':
+        return `<tr>
+          <td colspan="2" style="padding:6px 0;font-weight:800">${d}</td>
+          <td style="${num};padding:6px 8px;font-weight:800;border-top:1px solid ${rule};${neg(r.amount) ? 'color:#dc2626' : ''}">${r.amount}</td>
+          <td style="${num};padding:6px 0 6px 8px;font-weight:700;border-top:1px solid ${rule};color:${mute}">${r.percent}</td></tr>`;
+      default: return '';
+    }
+  }).join('');
+  return `<table style="width:100%;border-collapse:collapse;font-size:${print ? 12 : 13}px;color:${ink}">
+    <thead><tr style="border-bottom:1px solid ${rule}">
+      <th colspan="2"></th>
+      <th style="${num};padding:4px 8px;font-weight:800">${amountLabel}</th>
+      <th style="${num};padding:4px 0 4px 8px;font-weight:800;width:72px">%</th>
+    </tr></thead><tbody>${body}</tbody></table>`;
+}
+
+async function _renderPLStatement(rows) {
+  if (!_companySettingsCache) { try { _companySettingsCache = await SettingsAPI.getCompany(); } catch (_) {} }
+  const s = _companySettingsCache || {};
+  const from = document.getElementById('rpt-from')?.value, to = document.getElementById('rpt-to')?.value;
+  const closing = document.getElementById('rpt-closing')?.checked !== false;
+  const el = document.getElementById('report-statement');
+  el.innerHTML = `<div style="max-width:880px">
+      <div style="margin-bottom:14px">
+        <div style="font-size:18px;font-weight:900">${_p3Esc(s.company_name || 'SmartRetail Store')}</div>
+        <div style="font-size:12px;color:var(--text-secondary)">${[s.address, [s.phone, s.email].filter(Boolean).join(' · ')].filter(Boolean).map(_p3Esc).join(' — ')}</div>
+        <div style="margin-top:8px;font-size:13px;font-weight:800;letter-spacing:.5px">PROFIT &amp; LOSS STATEMENT</div>
+        <div style="font-size:12px;color:var(--text-secondary)">From ${from || '…'} to ${to || '…'}${closing ? '' : ' · closing stock not deducted'}</div>
+      </div>
+      ${_plStatementHtml(rows, _plAmountLabel(), false)}
+    </div>`;
+}
+
+let _currentReportSlug = 'sales';
+
+async function generateReport() {
+  const typeSelect = document.getElementById('rpt-type');
+  const slug = typeSelect ? typeSelect.value : 'sales';
+  _currentReportSlug = slug;
+  const titleMap = {
+    sales: 'Sales Report', inventory: 'Inventory Report', purchase: 'Purchase Report',
+    expenses: 'Expense Report', profit: 'Profit & Loss Report', customers: 'Customer Report',
+    suppliers: 'Supplier Report', tax: 'Tax Report',
+  };
+  document.getElementById('report-table-title').textContent = slug === 'profit' ? 'Profit & Loss Statement' : (titleMap[slug] || 'Report');
+
+  // The statement replaces the generic table for Profit & Loss only.
+  const stmtEl = document.getElementById('report-statement');
+  const tableWrap = document.getElementById('report-table').closest('.table-wrap');
+  const closingWrap = document.getElementById('rpt-closing-wrap');
+  if (closingWrap) closingWrap.style.display = slug === 'profit' ? 'inline-flex' : 'none';
+  if (stmtEl) stmtEl.style.display = slug === 'profit' ? 'block' : 'none';
+  if (tableWrap) tableWrap.style.display = slug === 'profit' ? 'none' : '';
+
+  try {
+    const data = await ReportsAPI.fetch(slug, _reportParams(slug));
+    let rows = data.results || [];
+    if (slug === 'profit') { await _renderPLStatement(rows); return; }
+    // Derive columns from the first row's keys (backend already sends
+    // human-friendly values as strings) — falls back to an empty table
+    // with just a "No data" message if there are no rows yet. If a Total
+    // row was appended, its key set is identical to every other row's, so
+    // this stays accurate either way.
+    const allColumns = rows.length ? Object.keys(rows[0]) : [];
+    _reportColumnsCache = allColumns;
+    _reportHasTotalRow = rows.some(r => _isTotalRow(r, allColumns));
+
+    const prefs = _reportColumnPrefs(slug);
+    if (_reportHasTotalRow && prefs._showTotal === false) {
+      rows = rows.filter(r => !_isTotalRow(r, allColumns));
+    }
+
+    const columns = _visibleReportColumns(slug, allColumns);
+    _reportVisibleColumns = columns;
+
+    document.getElementById('report-table-head').innerHTML = columns
+      .map(c => `<th>${_fmtColLabel(c)}</th>`).join('');
+
+    document.getElementById('report-table').innerHTML = rows.length
+      ? rows.map(row => {
+          const isTotal = _isTotalRow(row, allColumns);
+          const style = isTotal ? ' style="font-weight:800;border-top:2px solid var(--border)"' : '';
+          return `<tr${style}>${columns.map(c => (c === 'ledger_check' && String(row[c]).startsWith('MISMATCH')) ? `<td style="color:var(--red);font-weight:800">${row[c]}</td>` : `<td>${row[c]}</td>`).join('')}</tr>`;
+        }).join('')
+      : `<tr><td colspan="${columns.length||1}" style="text-align:center;color:var(--text-muted);padding:20px">No data for the selected range</td></tr>`;
+  } catch (err) {
+    toast(err.message || 'Failed to generate report', 'error');
+  }
+}
+
+async function exportCurrentReport(format) {
+  try {
+    await ReportsAPI.download(_currentReportSlug, format, _reportParams(_currentReportSlug));
+    toast(`${format.toUpperCase()} export downloaded`, 'success');
+  } catch (err) {
+    toast(err.message || 'Export failed', 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// USERS
+// ═══════════════════════════════════════════════════════
+let _userCache = [];
+const _roleBadgeMap = { super_admin:'badge-purple', admin:'badge-purple', manager:'badge-blue',
+  cashier:'badge-green', salesperson:'badge-green', inventory_manager:'badge-blue', customer:'badge-gray' };
+
+async function renderUsers() {
+  const data = await UsersAPI.list({ page_size: 500 });
+  _userCache = data.results || data;
+  document.getElementById('users-table').innerHTML = _userCache.map(u=>`
+    <tr>
+      <td class="td-mono">USR-${String(u.id).padStart(3,'0')}</td>
+      <td class="fw-700">${u.full_name||u.email}</td>
+      <td class="td-mono">${u.email}</td>
+      <td><span class="badge ${_roleBadgeMap[u.role]||'badge-gray'}">${u.role.replace(/_/g,' ')}</span></td>
+      <td>${u.email}</td>
+      <td style="font-size:11px;color:var(--text-secondary);max-width:200px">${['super_admin','admin'].includes(u.role)?'<span class="badge badge-purple">All Modules</span>':'<span class="badge badge-blue" style="font-size:9px">Role-based</span>'}</td>
+      <td style="font-size:12px">${u.last_login ? u.last_login.replace('T',' ').slice(0,16) : 'Never'}</td>
+      <td><span class="badge ${u.is_active?'badge-green':'badge-red'}" style="cursor:pointer" onclick="${u.id!==currentUser?.id?`toggleUserActive(${u.id},${u.is_active})`:''}" title="${u.id!==currentUser?.id?'Click to '+(u.is_active?'deactivate':'activate'):''}">${u.is_active?'Active':'Inactive'}</span></td>
+      <td>
+        <div class="flex-gap">
+          <button class="btn btn-ghost btn-xs" onclick="editUser(${u.id})"><i class="fa fa-edit"></i></button>
+          ${u.id!==currentUser?.id?`<button class="btn btn-ghost btn-xs" onclick="toggleUserActive(${u.id},${u.is_active})" style="color:${u.is_active?'var(--yellow)':'var(--green)'}" title="${u.is_active?'Deactivate':'Activate'}"><i class="fa ${u.is_active?'fa-user-slash':'fa-user-check'}"></i></button>`:''}
+          ${u.id!==currentUser?.id?`<button class="btn btn-ghost btn-xs" onclick="deleteUser(${u.id})" style="color:var(--red)" title="Delete permanently"><i class="fa fa-trash"></i></button>`:''}
+        </div>
+      </td>
+    </tr>`).join('');
+
+  // Activity log now comes from the audit-log API when needed elsewhere;
+  // this panel is left showing local session events only.
+  const logBody = document.getElementById('activity-log');
+  if (logBody) logBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);font-size:12px;padding:20px">See Audit Logs (backend) for full activity history</td></tr>';
+}
+
+function togglePermissionsPanel() {
+  // The backend uses fixed roles (no per-user custom permission sets), so the
+  // granular checkbox panel is no longer applicable — always hidden now.
+  const panel = document.getElementById('permissions-panel');
+  if (panel) panel.style.display = 'none';
+}
+
+function openUserModal() {
+  document.getElementById('user-modal-title').textContent='Add User';
+  document.getElementById('user-edit-id').value='';
+  ['usr-name','usr-username','usr-email','usr-pass'].forEach(i=>{
+    const el = document.getElementById(i); if (el) el.value='';
+  });
+  document.getElementById('usr-role').value='cashier';
+  togglePermissionsPanel();
+  openModal('user-modal');
+}
+
+function editUser(id) {
+  const u=_userCache.find(x=>x.id===id);
+  if (!u) return;
+  document.getElementById('user-modal-title').textContent='Edit User';
+  document.getElementById('user-edit-id').value=u.id;
+  document.getElementById('usr-name').value=u.full_name||'';
+  const usernameEl = document.getElementById('usr-username');
+  if (usernameEl) usernameEl.value=u.email;
+  document.getElementById('usr-email').value=u.email;
+  document.getElementById('usr-role').value=u.role;
+  document.getElementById('usr-pass').value='';
+  togglePermissionsPanel();
+  openModal('user-modal');
+}
+
+async function saveUser() {
+  const name=document.getElementById('usr-name').value.trim();
+  const email=document.getElementById('usr-email').value.trim();
+  if(!name||!email) { toast('Name and email required!','error'); return; }
+  const editId=parseInt(document.getElementById('user-edit-id').value);
+  const role=document.getElementById('usr-role').value;
+  const pass=document.getElementById('usr-pass').value;
+  const nameParts = name.split(' ');
+  const payload = {
+    first_name: nameParts[0] || name,
+    last_name: nameParts.slice(1).join(' ') || '-',
+    email, role, is_active: true,
+  };
+  if (pass) payload.password = pass;
+
+  try {
+    if (editId) {
+      await UsersAPI.update(editId, payload);
+      toastDone('update', 'User', name);
+    } else {
+      if (!pass) { toast('Password required!','error'); return; }
+      await UsersAPI.create(payload);
+      toastDone('add', 'User', name);
+    }
+    closeModal('user-modal');
+    renderUsers();
+  } catch (err) {
+    toast(err.message || 'Failed to save user', 'error');
+  }
+}
+
+async function deleteUser(id) {
+  if (!(await confirmModal("This user account will be permanently deleted. This can't be undone — their past sales/purchases/records stay intact, just no longer linked to a named user.", { title: 'Delete User?', confirmText: 'Delete Permanently', icon: 'fa-trash' }))) return;
+  try {
+    await UsersAPI.remove(id);
+    renderUsers();
+    toastDone('delete', 'User');
+  } catch (err) {
+    toast(err.message || 'Failed to delete user', 'error');
+  }
+}
+
+async function toggleUserActive(id, currentlyActive) {
+  const goingTo = currentlyActive ? 'deactivate' : 'activate';
+  if (!(await confirmModal(
+    currentlyActive ? "This user won't be able to sign in until reactivated." : "This user will be able to sign in again.",
+    { title: (currentlyActive?'Deactivate':'Activate') + ' User?', confirmText: currentlyActive?'Deactivate':'Activate', danger: currentlyActive, icon: currentlyActive?'fa-user-slash':'fa-user-check' }
+  ))) return;
+  try {
+    await UsersAPI.update(id, { is_active: !currentlyActive });
+    renderUsers();
+    toast(`User ${goingTo}d`, 'success');
+  } catch (err) {
+    toast(err.message || `Failed to ${goingTo} user`, 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// MODAL HELPERS
+// ═══════════════════════════════════════════════════════
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+document.querySelectorAll('.modal-overlay').forEach(el => {
+  el.addEventListener('click', e => {
+    if (e.target !== el) return;
+    if (el.id === 'confirm-modal') _resolveConfirm(false);
+    else if (el.id === 'general-auth-modal') _generalAuthFinish(null);
+    else closeModal(el.id);
+  });
+});
+
+// ═══════════════════════════════════════════════════════
+// CONFIRM DIALOG — modern replacement for native confirm()
+// ═══════════════════════════════════════════════════════
+// Usage: if (await confirmModal('Delete this product?')) { ... }
+// Pass { danger: false, icon: 'fa-sign-out-alt', title: 'Sign out?',
+//        confirmText: 'Sign Out' } for non-destructive confirmations.
+let _confirmResolve = null;
+
+function confirmModal(message, opts = {}) {
+  const {
+    title = opts.danger === false ? 'Please confirm' : 'Are you sure?',
+    confirmText = opts.danger === false ? 'Confirm' : 'Delete',
+    cancelText = 'Cancel',
+    danger = true,
+    icon = danger ? 'fa-trash' : 'fa-sign-out-alt',
+  } = opts;
+
+  return new Promise((resolve) => {
+    // If a confirm is already pending (shouldn't normally happen), cancel it
+    // rather than leaving that earlier caller's await hanging forever.
+    if (_confirmResolve) _confirmResolve(false);
+    _confirmResolve = resolve;
+
+    const overlay = document.getElementById('confirm-modal');
+    overlay.querySelector('.confirm-icon').className = 'confirm-icon ' + (danger ? 'danger' : 'neutral');
+    overlay.querySelector('.confirm-icon i').className = 'fa ' + icon;
+    overlay.querySelector('.confirm-title').textContent = title;
+    overlay.querySelector('.confirm-message').textContent = message;
+    overlay.querySelector('.confirm-btn-cancel').textContent = cancelText;
+    const confirmBtn = overlay.querySelector('.confirm-btn-confirm');
+    confirmBtn.textContent = confirmText;
+    confirmBtn.className = 'btn confirm-btn-confirm ' + (danger ? 'btn-red' : 'btn-accent');
+
+    openModal('confirm-modal');
+    setTimeout(() => confirmBtn.focus(), 60);
+  });
+}
+
+function _resolveConfirm(result) {
+  closeModal('confirm-modal');
+  if (_confirmResolve) { _confirmResolve(result); _confirmResolve = null; }
+}
+
+// ═══════════════════════════════════════════════════════
+// TOAST
+// ═══════════════════════════════════════════════════════
+const _toastIcons = { success:'fa-check-circle', error:'fa-times-circle', warning:'fa-exclamation-triangle' };
+const _toastMaxVisible = 4;
+const _toastDefaultDuration = 4200;
+
+// Friendly "Customer updated" style popup used after every add / update /
+// delete: a bold title plus a proper sentence naming what was changed.
+//   toastDone('update', 'Customer', 'Ali Traders')
+function toastDone(action, entity, name) {
+  const label = name ? '\u201c' + _bkEsc(name) + '\u201d' : 'The ' + entity.toLowerCase();
+  const verb = { add: 'added', update: 'updated', delete: 'deleted' }[action] || 'saved';
+  const tail = action === 'delete' ? ' has been deleted permanently.' : ' has been ' + verb + ' successfully.';
+  toast({ title: entity + ' ' + verb, text: label + tail, kind: action }, 'success');
+}
+
+const _toastKindIcons = { add: 'fa-plus', update: 'fa-pen', delete: 'fa-trash-can' };
+
+function toast(msg, type='success', duration=_toastDefaultDuration) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+
+  // msg is either a plain string or { title, text, kind } (see toastDone).
+  let title = '', text = msg, kind = '';
+  if (msg && typeof msg === 'object') { title = msg.title || ''; text = msg.text || ''; kind = msg.kind || ''; }
+  else if (type === 'success') {
+    // Plain success strings get the matching icon/colour automatically.
+    const m = String(msg);
+    if (/\b(deleted|removed)\b/i.test(m)) kind = 'delete';
+    else if (/\b(added|created)\b/i.test(m)) kind = 'add';
+    else if (/\b(updated|saved|edited)\b/i.test(m)) kind = 'update';
+  }
+
+  // De-dupe: if the exact same message/type is already showing, just bump
+  // its counter and restart the auto-dismiss timer instead of stacking a
+  // second identical box (this is what used to spam 4 copies of the same
+  // backend error onto the screen).
+  const key = type + '::' + title + '::' + text;
+  const existing = container.querySelector(`.toast[data-key="${CSS.escape(key)}"]`);
+  if (existing) {
+    const countEl = existing.querySelector('.toast-count');
+    const n = (parseInt(existing.dataset.count||'1', 10) + 1);
+    existing.dataset.count = n;
+    if (countEl) countEl.textContent = '×' + n;
+    else existing.querySelector('.toast-msg').insertAdjacentHTML('beforeend', ` <span class="toast-count">×${n}</span>`);
+    const bar = existing.querySelector('.toast-progress');
+    if (bar) { bar.style.animation = 'none'; void bar.offsetWidth; bar.style.animation = `toastProgress ${duration}ms linear forwards`; }
+    clearTimeout(existing._dismissTimer);
+    existing._dismissTimer = setTimeout(() => _dismissToast(existing), duration);
+    return;
+  }
+
+  // Cap how many can pile up on screen at once — oldest goes first.
+  const visible = container.querySelectorAll('.toast');
+  if (visible.length >= _toastMaxVisible) _dismissToast(visible[0]);
+
+  const t = document.createElement('div');
+  t.className = 'toast ' + type + (kind ? ' k-' + kind : '');
+  t.dataset.key = key;
+  t.dataset.count = '1';
+  const iconCls = (type === 'success' && _toastKindIcons[kind]) || _toastIcons[type] || _toastIcons.success;
+  t.innerHTML = `
+    <div class="toast-icon"><i class="fa ${iconCls}"></i></div>
+    <div class="toast-body">${title ? `<div class="toast-title">${title}</div>` : ''}<div class="toast-msg">${text}</div></div>
+    <button class="toast-close" onclick="_dismissToast(this.closest('.toast'))" aria-label="Dismiss"><i class="fa fa-times"></i></button>
+    <div class="toast-progress" style="animation-duration:${duration}ms"></div>`;
+  container.appendChild(t);
+  t._dismissTimer = setTimeout(() => _dismissToast(t), duration);
+}
+
+function _dismissToast(el) {
+  if (!el || el.classList.contains('toast-out')) return;
+  clearTimeout(el._dismissTimer);
+  el.classList.add('toast-out');
+  el.addEventListener('animationend', () => el.remove(), { once: true });
+  setTimeout(() => el.remove(), 400); // safety net if animationend doesn't fire
+}
+
+// ═══════════════════════════════════════════════════════
+// A4 REPORT PRINT
+// ═══════════════════════════════════════════════════════
+// Column keys that hold money/quantity values — right-aligned + tabular
+// numerals in print so figures line up under their own header instead of
+// drifting under whichever column happens to be next to them.
+const _REPORT_NUMERIC_COLS = new Set([
+  'subtotal', 'discount_amount', 'tax_amount', 'total_amount', 'paid_amount',
+  'amount', 'quantity', 'reorder_level', 'stock_value', 'total_orders',
+  'total_spent', 'outstanding_balance', 'loyalty_points', 'total_purchased',
+  'outstanding_payable', 'cost_of_sale', 'profit', 'entries',
+  'opening', 'purchased', 'sold', 'adjustments', 'remaining', 'cost_price',
+]);
+// Column keys that are identifiers/codes — monospace, left-aligned, so they
+// read like an invoice/PO number rather than prose.
+const _REPORT_CODE_COLS = new Set(['invoice_number', 'po_number', 'sku', 'phone']);
+
+const _REPORT_ICON = {
+  sales: '🧾', purchase: '🛒', inventory: '📦', expenses: '💸',
+  profit: '📊', customers: '👥', suppliers: '🏭', tax: '🧮',
+};
+
+function _reportCompanyHeader(reportTitle, rangeLabel) {
+  const s = _companySettingsCache || {};
+  const storeName = s.company_name || 'SmartRetail Store';
+  const storeAddress = s.address || '';
+  const storeContact = [s.phone, s.email].filter(Boolean).join(' · ');
+  const logoHtml = s.logo
+    ? `<img src="${s.logo}" style="height:40px;object-fit:contain;margin-bottom:4px">`
+    : `<div class="a4-logo-name">${_REPORT_ICON[_currentReportSlug] || '🏪'} ${storeName}</div>`;
+  const today = new Date().toLocaleDateString();
+  return `<div class="a4-header">
+      <div>
+        ${logoHtml}
+        ${s.logo ? `<div class="a4-logo-name">${storeName}</div>` : ''}
+        ${storeAddress ? `<div style="font-size:11px;color:#555;margin-top:3px">${storeAddress}</div>` : ''}
+        ${storeContact ? `<div style="font-size:11px;color:#555">${storeContact}</div>` : ''}
+        ${s.tax_id ? `<div style="font-size:11px;color:#555">NTN/Tax ID: ${s.tax_id}</div>` : ''}
+      </div>
+      <div class="a4-store-info">
+        <strong style="font-size:14px">${reportTitle.toUpperCase()}</strong><br>
+        ${rangeLabel}<br>
+        Generated: ${today}<br>
+        By: ${currentUser?.full_name || 'Admin'}
+      </div>
+    </div>`;
+}
+
+function _reportRangeLabel() {
+  const dateFrom = document.getElementById('rpt-from')?.value;
+  const dateTo = document.getElementById('rpt-to')?.value;
+  return (dateFrom || dateTo) ? `Range: ${dateFrom || '…'} to ${dateTo || '…'}` : 'Range: All dates';
+}
+
+function _printA4(bodyHtml, reportTitle) {
+  const today = new Date().toLocaleDateString();
+  const s = _companySettingsCache || {};
+  const storeName = s.company_name || 'SmartRetail Store';
+  const html = `<div class="a4-doc">
+    ${_reportCompanyHeader(reportTitle, _reportRangeLabel())}
+    <div class="a4-doc-title">${reportTitle}</div>
+    ${bodyHtml}
+    <div class="a4-footer">
+      <span>${storeName} — ${reportTitle}</span>
+      <span>Printed: ${today}</span>
+    </div>
+  </div>`;
+  const printArea = document.getElementById('print-area');
+  printArea.innerHTML = html;
+  printArea.style.display = 'block';
+  window.print();
+  setTimeout(() => { printArea.style.display = 'none'; }, 1000);
+}
+
+function _fmtColLabel(c) {
+  return c.replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
+async function printReportA4() {
+  const titleMap = {
+    sales: 'Sales Report', inventory: 'Inventory Report', purchase: 'Purchase Report',
+    expenses: 'Expense Report', profit: 'Profit & Loss Report', customers: 'Customer Report',
+    suppliers: 'Supplier Report', tax: 'Tax Report',
+  };
+  const reportTitle = titleMap[_currentReportSlug] || 'Report';
+
+  // Profit & Loss prints as the standard statement (company header comes from _printA4).
+  if (_currentReportSlug === 'profit') {
+    let data;
+    try {
+      data = await ReportsAPI.fetch('profit', _reportParams('profit'));
+    } catch (err) {
+      toast(err.message || 'Failed to load Profit & Loss', 'error');
+      return;
+    }
+    if (!_companySettingsCache) { try { _companySettingsCache = await SettingsAPI.getCompany(); } catch (_) {} }
+    _printA4(_plStatementHtml(data.results || [], _plAmountLabel(), true), 'Profit & Loss Statement');
+    return;
+  }
+
+  // Every other report: same generic engine, but columns/alignment are
+  // driven entirely by whatever this report type actually returned — no
+  // more hardcoded Sales-shaped header forced onto Purchase/Tax/Inventory.
+  // Respects whatever the user chose in Report Settings, so a column hidden
+  // on screen stays hidden on the printed A4 copy too.
+  const columns = _reportVisibleColumns && _reportVisibleColumns.length
+    ? _reportVisibleColumns
+    : Array.from(document.querySelectorAll('#report-table-head th')).map((th, i) => th.dataset.col || `col${i}`);
+
+  const dataRows = [];
+  document.querySelectorAll('#report-table tr').forEach(tr => {
+    const cells = Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim());
+    if (cells.length && cells.length === columns.length) dataRows.push(cells);
+  });
+
+  if (!dataRows.length) {
+    toast('No data for the selected range — nothing to print.', 'warning');
+    return;
+  }
+
+  const headHtml = columns.map(c => {
+    const align = _REPORT_NUMERIC_COLS.has(c) ? 'right' : 'left';
+    return `<th style="text-align:${align}">${_fmtColLabel(c)}</th>`;
+  }).join('');
+
+  // The Total row (when the report has one) is the printed equivalent of an
+  // invoice/sale-slip's Total line, so it's bolded with a rule above it
+  // instead of blending into the rest of the table.
+  const bodyRowsHtml = dataRows.map(cells => {
+    const isTotal = cells.some(c => String(c || '').trim().toUpperCase() === 'TOTAL');
+    const rowStyle = isTotal ? ' style="font-weight:800;border-top:2px solid #333"' : '';
+    return `<tr${rowStyle}>${cells.map((val, i) => {
+      const col = columns[i];
+      const align = _REPORT_NUMERIC_COLS.has(col) ? 'right' : 'left';
+      const mono = _REPORT_CODE_COLS.has(col) ? 'font-family:monospace;font-size:11px' : '';
+      return `<td style="text-align:${align};${mono}">${val}</td>`;
+    }).join('')}</tr>`;
+  }).join('');
+
+  const body = `<table>
+      <thead><tr>${headHtml}</tr></thead>
+      <tbody>${bodyRowsHtml}</tbody>
+    </table>`;
+  _printA4(body, reportTitle);
+}
+
+// ═══════════════════════════════════════════════════════
+// ORDER BOOKING MODULE
+// ═══════════════════════════════════════════════════════
+function initBooking() {
+  _editingBookingId = null;
+  _editingCompletedSaleId = null;
+  document.getElementById('booking-form-wrap').style.display = 'none';
+  document.getElementById('booking-list-wrap').style.display = '';
+  const today = new Date().toISOString().split('T')[0];
+  if (!document.getElementById('bk-date-filter').value)
+    document.getElementById('bk-date-filter').value = today;
+  renderBookingList();
+}
+
+async function newBookingForm(editId, editCompletedInPlace) {
+  _editingBookingId = null;
+  _editingCompletedSaleId = null;
+  _bkEditPrev = null;
+  _bkEditOriginal = null;
+  document.getElementById('booking-form-wrap').style.display = '';
+  document.getElementById('booking-list-wrap').style.display = 'none';
+  setTimeout(()=>document.getElementById('booking-form-wrap').scrollIntoView({behavior:'smooth'}),50);
+
+  const today = new Date().toISOString().split('T')[0];
+  document.getElementById('bk-date').value = today;
+  document.getElementById('bk-invoice').value = 'Assigned on save';
+  document.getElementById('bk-customer').value = '';
+  document.getElementById('bk-customer-search').value = '';
+  document.getElementById('bk-payment').value = 'cash';
+  document.getElementById('bk-notes').value = '';
+  document.getElementById('bk-discount').value = 0;
+  document.getElementById('bk-tax').value = 0;
+  document.getElementById('bk-acc-search').value = '';
+  document.getElementById('bk-acc-display').value = '';
+  document.getElementById('bk-customer-info').style.display = 'none';
+  _bookingItems = [{ productId:'', name:'', rate:0, qty:0, cartons:0, ppc:1 }];
+  document.getElementById('booking-form-title').textContent = editId ? 'Loading…' : '📝 New Order Booking';
+  // Wipe the previous bill from the screen RIGHT NOW (before the network call
+  // below), otherwise the old bill stays visible for a few seconds.
+  try { renderBookingItemRows(); calcBookingTotals(); } catch (e) {}
+
+  await _loadBookingLookups();
+
+  if (editId && editCompletedInPlace) {
+    // Editing an already-finalized invoice IN PLACE — same invoice_number,
+    // same row (see editCompletedSlipFromModal / SalesAPI.edit). Nothing is
+    // returned/reversed here on the frontend; the backend's edit_completed_sale
+    // service handles reversing the old items and reapplying the new ones.
+    let sale;
+    try { sale = await SalesAPI.get(editId); }
+    catch (err) { toast(err.message || 'Failed to load invoice', 'error'); closeBookingForm(); return; }
+    _editingCompletedSaleId = editId;
+    _bkEditPrev = { customerId: sale.customer, value: Math.max(0, Number(sale.previous_balance) || 0) };
+    document.getElementById('booking-form-title').textContent = `✏️ Editing Invoice — ${sale.invoice_number}`;
+    document.getElementById('bk-invoice').value = sale.invoice_number;
+    document.getElementById('bk-notes').value = (sale.notes||'').replace(/^Order Booking\s*(—\s*)?/,'').replace(/\s*\(date:[^)]*\)\s*$/,'');
+    if (sale.customer) {
+      document.getElementById('bk-customer').value = sale.customer;
+      onBookingCustomerChange();
+    }
+    _bookingItems = sale.items
+      .filter(it => (it.quantity - it.quantity_returned) > 0)
+      .map(it => ({
+        productId: it.product, name: it.product_name, rate: Number(it.unit_price),
+        qty: it.quantity - it.quantity_returned, cartons: 0, ppc: 1, taxPct: Number(it.tax_percent)||0,
+        discPct: Number(it.discount_percent)||0,
+      }));
+    _bookingItems.push({ productId:'', name:'', rate:0, qty:0, cartons:0, ppc:1, taxPct:0, discPct:0 });
+
+    // Keep what the invoice really was: its Cash/Credit label (the form used to
+    // reset to Cash, silently flipping a credit bill) and its bill-level
+    // discount (it used to be dropped, changing the total).
+    document.getElementById('bk-payment').value = sale.is_credit ? 'credit' : 'cash';
+    let lineDisc = 0;
+    sale.items.forEach(it => {
+      const base = Number(it.unit_price) * Number(it.quantity);
+      const tax = base * (Number(it.tax_percent)||0) / 100;
+      lineDisc += (base + tax) * (Number(it.discount_percent)||0) / 100;
+    });
+    const billDisc = Math.max(0, Math.round((Number(sale.discount_amount) - lineDisc) * 100) / 100);
+    document.getElementById('bk-discount').value = billDisc;
+    _bkEditOriginal = {
+      customer: sale.customer || 0,
+      credit: !!sale.is_credit,
+      billDisc,
+      notes: document.getElementById('bk-notes').value,
+      items: _bkItemKeys(sale.items
+        .filter(it => (it.quantity - it.quantity_returned) > 0)
+        .map(it => ({ product: it.product, quantity: it.quantity - it.quantity_returned,
+                      unit_price: it.unit_price, discount_percent: it.discount_percent }))),
+    };
+  } else if (editId) {
+    // Editing a held (draft) invoice — pull its saved items/customer back in.
+    let sale;
+    try { sale = await SalesAPI.get(editId); }
+    catch (err) { toast(err.message || 'Failed to load invoice', 'error'); closeBookingForm(); return; }
+    if (sale.status !== 'draft') {
+      toast('Only a held invoice can be edited — use Sale Return to correct a completed one.', 'warning');
+      closeBookingForm();
+      return;
+    }
+    _editingBookingId = editId;
+    _bkEditPrev = { customerId: sale.customer, value: Math.max(0, Number(sale.previous_balance) || 0) };
+    document.getElementById('booking-form-title').textContent = `✏️ Editing Held Invoice — ${sale.invoice_number}`;
+    document.getElementById('bk-invoice').value = sale.invoice_number;
+    document.getElementById('bk-notes').value = (sale.notes||'').replace(/^Order Booking\s*(—\s*)?/,'').replace(/\s*\(date:[^)]*\)\s*$/,'');
+    if (sale.customer) {
+      document.getElementById('bk-customer').value = sale.customer;
+      onBookingCustomerChange();
+    }
+    _bookingItems = sale.items.map(it => ({
+      productId: it.product, name: it.product_name, rate: Number(it.unit_price),
+      qty: it.quantity, cartons: 0, ppc: 1, taxPct: Number(it.tax_percent)||0,
+      discPct: Number(it.discount_percent)||0,
+    }));
+    _bookingItems.push({ productId:'', name:'', rate:0, qty:0, cartons:0, ppc:1, taxPct:0, discPct:0 });
+  } else {
+    document.getElementById('booking-form-title').textContent = '📝 New Order Booking';
+  }
+
+  renderBookingItemRows();
+  calcBookingTotals();
+
+  // No manual clicks needed to get started — land the cursor straight in
+  // the customer search box (unless we just loaded an editing customer).
+  if (!editId) setTimeout(()=>{ document.getElementById('bk-customer-search')?.focus(); }, 60);
+}
+
+function closeBookingForm() {
+  _editingBookingId = null;
+  _editingCompletedSaleId = null;
+  document.getElementById('booking-form-wrap').style.display = 'none';
+  document.getElementById('booking-list-wrap').style.display = '';
+  renderBookingList();
+}
+
+function searchCustomerByAcc(val) {
+  const v = (val||'').trim();
+  if (!v) { bkCustDropClose(); return; }
+  // Previously this used _bkCustomerCache.find(...), which silently
+  // auto-picked only the VERY FIRST matching customer (or did nothing at
+  // all if that first candidate wasn't the one you wanted) — no list was
+  // ever shown, so typing a letter here looked like the filter just
+  // wasn't working even when several customers matched. This field now
+  // routes through the same case-insensitive, list-showing search as the
+  // Customer Name field below, so every match shows up and any one of
+  // them can be picked from the dropdown.
+  const searchEl = document.getElementById('bk-customer-search');
+  if (searchEl) searchEl.value = v;
+  bkCustSearch(v);
+}
+
+function clearAccSearch() {
+  document.getElementById('bk-acc-search').value='';
+  document.getElementById('bk-customer').value='';
+  document.getElementById('bk-customer-search').value='';
+  document.getElementById('bk-acc-display').value='';
+  document.getElementById('bk-customer-info').style.display='none';
+  calcBookingTotals();
+}
+
+let _bkCustomerCache = [];
+let _bkProductCache = [];
+let _bkStockByProduct = {};
+// Real per-customer balances (all invoices minus ALL payments), fetched fresh
+// every time the booking form opens. customer.outstanding_balance is only a
+// cached counter that drifts (returns, edits, deleted payments...), which is
+// why a customer with a nil balance could still show "Rs.3623.57" here.
+let _bkBalances = null;
+function _bkCustBalance(c) {
+  if (_bkBalances) {
+    const b = _bkBalances[c.id];
+    return b ? Math.max(0, Number(b.remaining) || 0) : 0;   // no invoices/payments = nothing owed
+  }
+  return Number(c.outstanding_balance) || 0;                 // balances endpoint failed: best effort
+}
+
+async function _loadBookingLookups() {
+  try {
+    const bal = await CustomersAPI.balances();
+    _bkBalances = bal.balances || bal || {};
+  } catch (_) { _bkBalances = null; }
+  const [custData, prodData, stockData] = await Promise.all([
+    CustomersAPI.list({ page_size: 500 }),
+    ProductsAPI.list({ page_size: 500 }),  // status filter removed — was silently hiding products whose status wasn't exactly 'active'
+    InventoryAPI.stockItems({ page_size: 1000 }),
+  ]);
+  _bkCustomerCache = custData.results || custData;
+  _bkProductCache = prodData.results || prodData;
+  _bkStockByProduct = {};
+  (stockData.results || stockData).forEach(si => {
+    _bkStockByProduct[si.product] = (_bkStockByProduct[si.product] || 0) + si.quantity;
+  });
+}
+
+// Live "previous balance" for whichever customer is currently selected in
+// the booking form — kept in sync with the backend's own calculation (see
+// calcBookingTotals below) instead of the customer.outstanding_balance cache
+// field, which only gets bumped for credit sales and can drift out of sync
+// with what the invoice will actually show once saved (apps.sales.services
+// snapshots sale.previous_balance from this same live ledger figure).
+let _bkPrevBalanceLive = 0;
+
+async function onBookingCustomerChange() {
+  const id = parseInt(document.getElementById('bk-customer').value);
+  const cust = _bkCustomerCache.find(c=>c.id===id);
+  const searchEl = document.getElementById('bk-customer-search');
+  if (!cust) {
+    document.getElementById('bk-acc-display').value='';
+    document.getElementById('bk-customer-info').style.display='none';
+    if (searchEl) searchEl.value='';
+    _bkPrevBalanceLive = 0;
+    calcBookingTotals();
+    return;
+  }
+  const acc = accNo(cust.id, cust.account_no);
+  document.getElementById('bk-acc-display').value = acc;
+  document.getElementById('bk-acc-search').value = acc;
+  if (searchEl) searchEl.value = `${cust.name} (${acc})`;
+  document.getElementById('bk-customer-info').style.display='';
+  // Show the cached figure immediately (feels instant), then correct it
+  // with the live ledger value — same source the backend will snapshot
+  // onto the invoice when this booking is saved.
+  // Editing an existing invoice for the same customer: its own frozen
+  // Previous Balance, not the live ledger (which already counts this bill).
+  const useSnapshot = !!(_bkEditPrev && _bkEditPrev.customerId === cust.id);
+  _bkPrevBalanceLive = useSnapshot ? _bkEditPrev.value : _bkCustBalance(cust);
+  document.getElementById('bk-prev-balance').textContent = 'Rs.'+_bkPrevBalanceLive.toFixed(2);
+  document.getElementById('bk-total-purchases').textContent = String(cust.loyalty_points || 0);
+  document.getElementById('bk-last-visit').textContent = (cust.updated_at||'').slice(0,10)||'—';
+  calcBookingTotals();
+
+  if (useSnapshot) return;   // nothing live to fetch — the invoice's own figure is final
+
+  try {
+    const ledger = await CustomersAPI.ledger(cust.id);
+    // Bail out if the customer selection changed while this was in flight.
+    if (parseInt(document.getElementById('bk-customer').value) !== cust.id) return;
+    _bkPrevBalanceLive = Number(ledger.remaining)||0;
+    document.getElementById('bk-prev-balance').textContent = 'Rs.'+_bkPrevBalanceLive.toFixed(2);
+    calcBookingTotals();
+  } catch (err) {
+    // Live ledger fetch failed — keep the cached-field estimate shown above.
+  }
+}
+
+// ── Customer search-as-you-type (Order Booking) ───────────────────
+// Same UX as the product search box: type any part of the name or phone
+// number and matching customers drop down below the field.
+function _bkEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
+}
+
+function _bkCustDropRows(list) {
+  return list.map(c => {
+    const acc = accNo(c.id, c.account_no);
+    // Address under the name (falls back to city) so two customers with the
+    // same/similar name can be told apart right in the dropdown.
+    const addr = String(c.address || c.city || '').replace(/\s+/g, ' ').trim();
+    const bal = _bkCustBalance(c);
+    const balColor = bal>0 ? 'var(--red)' : 'var(--green)';
+    return `<div onmousedown="bkCustSelect(${c.id})" style="display:flex;align-items:center;gap:10px;padding:9px 14px;cursor:pointer;border-bottom:1px solid var(--border)" onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background=''">
+      <span style="font-size:18px;flex-shrink:0">👤</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.name}</div>
+        <div style="font-size:10px;color:var(--text-muted);font-family:var(--mono)">${acc}</div>
+        ${addr ? `<div title="${_bkEsc(addr)}" style="font-size:10px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">📍 ${_bkEsc(addr)}</div>` : ''}
+      </div>
+      <div style="text-align:right;flex-shrink:0">
+        <div style="font-size:12px;font-weight:800;color:${balColor}">Rs.${bal.toFixed(2)}</div>
+        <div style="font-size:9px;color:var(--text-muted)">balance</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// Ranks customers for the search box: names that START with the typed text
+// first, then anything else containing it (name / phone / email / account).
+// `extraIds` = customers the server matched that the local rules can't see
+// (e.g. multi-word searches) — they're kept, just ranked last.
+function _bkCustMatches(lc, extraIds) {
+  const rank = (c) => {
+    const name = (c.name||'').toLowerCase();
+    const phone = (c.phone||'').toLowerCase(), email = (c.email||'').toLowerCase();
+    const acc = accNo(c.id, c.account_no).toLowerCase();
+    if (name.startsWith(lc)) return 0;   // starts-with → top of the list
+    if (name.includes(lc) || phone.includes(lc) || email.includes(lc) || acc.includes(lc)) return 1;
+    if (extraIds && extraIds.has(c.id)) return 2;
+    return -1; // no match
+  };
+  return _bkCustomerCache
+    .map(c => ({ c, r: rank(c) }))
+    .filter(x => x.r >= 0)
+    .sort((a, b) => a.r - b.r || a.c.name.localeCompare(b.c.name))
+    .slice(0, 20)
+    .map(x => x.c);
+}
+
+function bkCustSearch(q) {
+  const drop = document.getElementById('bk-cust-drop');
+  if (!drop) return;
+  const lc = (q||'').toLowerCase().trim();
+  if (!lc) { drop.style.display='none'; return; }
+  const localResults = _bkCustMatches(lc);
+
+  drop.style.display='';
+  drop.innerHTML = localResults.length
+    ? _bkCustDropRows(localResults)
+    : '<div style="padding:12px 14px;font-size:12px;color:var(--text-muted);text-align:center"><i class="fa fa-spinner fa-spin"></i> Searching...</div>';
+
+  // _bkCustomerCache only holds the first batch of customers loaded when
+  // the form opened (capped at 500), so anyone past that cutoff is found by
+  // a live server search. Its results are MERGED into the cache and the
+  // list is re-ranked with the same rules as the instant preview — they
+  // used to REPLACE the preview, and since the server returns them in plain
+  // alphabetical order (matching anywhere, even inside e-mails), the
+  // "starts with what you typed" customers that had just appeared would
+  // vanish a moment later.
+  debounced('bk-cust-live-search', async () => {
+    let serverResults = [];
+    try {
+      const data = await CustomersAPI.list({ search: q, page_size: 20 });
+      serverResults = data.results || data;
+    } catch (err) {
+      return; // offline/server error — leave the local preview as-is
+    }
+    serverResults.forEach(sc => {
+      if (!_bkCustomerCache.some(c => c.id === sc.id)) _bkCustomerCache.push(sc);
+    });
+    // Only repaint if the user hasn't since changed what they're typing.
+    if ((document.getElementById('bk-customer-search')?.value||'').toLowerCase().trim() !== lc) return;
+    const finalResults = _bkCustMatches(lc, new Set(serverResults.map(sc => sc.id)));
+    drop.innerHTML = finalResults.length
+      ? _bkCustDropRows(finalResults)
+      : '<div style="padding:12px 14px;font-size:12px;color:var(--text-muted);text-align:center"><i class="fa fa-search-minus"></i> No customer found</div>';
+  }, 250);
+}
+
+function bkCustSearchFocus() {
+  const inp = document.getElementById('bk-customer-search');
+  if (!inp) return;
+  if (!inp.value.trim()) {
+    const drop = document.getElementById('bk-cust-drop');
+    if (!drop || !_bkCustomerCache.length) return;
+    drop.style.display='';
+    drop.innerHTML = _bkCustDropRows(_bkCustomerCache.slice(0, 20));
+  } else {
+    bkCustSearch(inp.value);
+  }
+}
+
+function bkCustSelect(id) {
+  document.getElementById('bk-customer').value = id;
+  onBookingCustomerChange();
+  bkCustDropClose();
+  // Customer picked → send the user straight into product selection,
+  // whichever row is still empty and waiting for a product.
+  setTimeout(()=>{
+    const emptyIdx = _bookingItems.findIndex(it => !it.productId);
+    const idx = emptyIdx >= 0 ? emptyIdx : 0;
+    document.getElementById('bk-prod-input-'+idx)?.focus();
+  }, 60);
+}
+
+function bkCustDropClose() {
+  const drop = document.getElementById('bk-cust-drop');
+  if (drop) drop.style.display='none';
+}
+
+function addBookingItemRow() {
+  _bookingItems.push({ productId:'', name:'', rate:0, qty:0, cartons:0, ppc:1 });
+  renderBookingItemRows();
+}
+
+function removeBookingItemRow(i) {
+  // The floating product-search dropdown (#bk-prod-float-drop) lives once
+  // in document.body, positioned over whichever row last opened it — it is
+  // NOT part of the row markup itself, so deleting a row never closes or
+  // repositions it. Every row below the deleted one then shifts up by one,
+  // but that leftover dropdown stays pinned at its old on-screen spot and
+  // silently overlaps the row that's now underneath it, blocking clicks
+  // and typing there — which looks exactly like that field went
+  // "disabled". Closing it here, before the rows shift, is what prevents
+  // that stale overlay.
+  bkProdDropClose();
+  _bookingItems.splice(i,1);
+  if (!_bookingItems.length) _bookingItems.push({ productId:'', name:'', rate:0, qty:0, cartons:0, ppc:1 });
+  renderBookingItemRows();
+  calcBookingTotals();
+}
+
+function renderBookingItemRows() {
+  const tbody = document.getElementById('bk-items-tbody');
+  if (!tbody) return;
+
+  // Preserve focus + cursor position across the innerHTML rebuild below —
+  // otherwise every keystroke in a Rate/Qty/Cartons field would knock focus
+  // out of the input after a single character, since innerHTML destroys and
+  // recreates every row's DOM nodes.
+  //
+  // IMPORTANT: <input type="number"> does NOT support selectionStart/
+  // selectionEnd/setSelectionRange in any browser — reading selectionStart
+  // on one just returns null (it doesn't throw, so this code never errors,
+  // but it silently never captures a position either). That left el.focus()
+  // as the only thing that ran on restore, and focusing a freshly-recreated
+  // number input places the caret at position 0 — so the NEXT digit typed
+  // lands in FRONT of what's already there instead of after it (type "7"
+  // then "2" and you'd see "27", not "72"). We work around the missing API
+  // with the standard trick for number inputs: reassigning .value to itself
+  // always moves the caret to the end.
+  const active = document.activeElement;
+  let focusId = null, focusIsNumber = false, selStart = null, selEnd = null;
+  if (active && tbody.contains(active) && active.id) {
+    focusId = active.id;
+    focusIsNumber = active.type === 'number';
+    if (typeof active.selectionStart === 'number') {
+      selStart = active.selectionStart;
+      selEnd = active.selectionEnd;
+    }
+  }
+
+  const units = ['Pcs','Lbs','Kg','Carton','Box','Dozen','Litre'];
+  tbody.innerHTML = _bookingItems.map((item,i)=>{
+    const unit     = item.unit||'Pcs';
+    const ppc      = item.ppc||1;
+    // Number(...) here (not just `||0`) because these fields can now hold
+    // the raw string the user is still typing (e.g. "12." mid-decimal —
+    // see updateBookingItem) rather than an already-parsed number. Mixing
+    // a string operand into a `+` would silently concatenate ("5"+2="52")
+    // instead of adding, which is exactly the kind of wrong total this is
+    // guarding against.
+    const qtyNum     = Number(item.qty) || 0;
+    const cartonsNum = Number(item.cartons) || 0;
+    const rateNum    = Number(item.rate) || 0;
+    const discPctNum = Number(item.discPct) || 0;
+    let totalPcs = 0;
+    if (unit==='Carton') {
+      totalPcs = cartonsNum*ppc + qtyNum;
+    } else {
+      totalPcs = qtyNum + cartonsNum*ppc;
+    }
+    const prod      = _bkProductCache.find(p => p.id == item.productId);
+    const baseAmt   = totalPcs*rateNum;
+    const taxPct    = Number(prod?.tax_rate ?? item.taxPct) || 0;
+    const taxAmt    = baseAmt*taxPct/100;
+    const priceWithTax = baseAmt+taxAmt;
+    const discPct   = item.discPct || 0;
+    // Line discount is taken off the tax-inclusive line price, matching how
+    // the backend computes SaleItem.line_discount — this only affects this
+    // one order line and never touches the product's own saved price.
+    const discAmt   = priceWithTax*discPct/100;
+    const lineTotal = priceWithTax-discAmt;
+    const prodLabel = item.productId ? (item.icon||'\u{1F4E6}')+' '+item.name : '';
+    return `<tr id="bk-row-${i}">
+      <td class="bk-c bk-c-prod" style="padding:5px 8px;position:relative">
+        <div style="position:relative">
+          <input class="form-input bk-prod-search" id="bk-prod-input-${i}"
+            placeholder="\u{1F50D} Search product by name or SKU..."
+            value="${prodLabel.replace(/"/g,'&quot;')}"
+            autocomplete="off"
+            style="padding:7px 10px;font-size:12px;width:100%;min-width:180px;padding-right:${item.productId?'28px':'10px'}"
+            oninput="bkProdSearch(${i},this.value)"
+            onfocus="bkProdSearchFocus(${i})"
+            onblur="setTimeout(()=>bkProdDropClose(${i}),180)">
+          ${item.productId ? `<button onmousedown="bkProdClear(${i})" title="Change product"
+            style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:12px;padding:0;line-height:1">✕</button>` : ''}
+        </div>
+
+      </td>
+      <td class="bk-c bk-c-rate" data-label="Rate" style="padding:5px 8px">
+        <input class="form-input" id="bk-rate-${i}" type="text" inputmode="decimal" value="${item.rate||0}"
+          style="padding:7px 10px;font-size:12px;width:88px"
+          onclick="setTimeout(()=>this.select())" oninput="updateBookingItem(${i},'rate',this.value)">
+      </td>
+      <td class="bk-c bk-c-qty" data-label="Qty" style="padding:5px 8px">
+        <input class="form-input bk-qty-input" id="bk-qty-${i}" type="text" inputmode="numeric" value="${item.qty||0}"
+          style="padding:7px 10px;font-size:12px;width:75px"
+          onclick="setTimeout(()=>this.select())" oninput="updateBookingItem(${i},'qty',this.value)">
+      </td>
+      <td class="bk-c bk-c-unit" data-label="Unit" style="padding:5px 8px">
+        <select class="form-input" style="padding:5px 8px;font-size:12px;width:90px"
+          onchange="updateBookingItemStr(${i},'unit',this.value)">
+          ${units.map(u=>`<option value="${u}" ${unit===u?'selected':''}>${u}</option>`).join('')}
+        </select>
+      </td>
+      <td class="bk-c bk-c-cart" data-label="Cartons" style="padding:5px 8px">
+        <div style="display:flex;align-items:center;gap:4px">
+          <input class="form-input" id="bk-cartons-${i}" type="text" inputmode="numeric" value="${item.cartons||0}"
+            style="padding:7px 10px;font-size:12px;width:65px"
+            onclick="setTimeout(()=>this.select())" oninput="updateBookingItem(${i},'cartons',this.value)">
+          <span style="font-size:9px;color:var(--text-muted);white-space:nowrap">x${ppc}</span>
+        </div>
+      </td>
+      <td class="bk-c bk-c-pcs" data-label="Total Pcs" style="padding:5px 8px;text-align:center;font-weight:700;color:var(--cyan);font-size:13px">
+        ${totalPcs}<span style="font-size:9px;color:var(--text-muted)"> ${unit==='Carton'?'pcs':unit}</span>
+      </td>
+      <td class="bk-c bk-c-disc" data-label="Disc %" style="padding:5px 8px">
+        <input class="form-input" id="bk-disc-${i}" type="text" inputmode="decimal" value="${discPct||0}"
+          title="Extra discount on this line only — does not change the product's saved price"
+          style="padding:7px 10px;font-size:12px;width:60px;color:var(--green)"
+          onclick="setTimeout(()=>this.select())" oninput="updateBookingItem(${i},'discPct',this.value)">
+      </td>
+      <td class="bk-c bk-c-tax" data-label="Tax" style="padding:5px 8px;text-align:center">
+        ${taxPct>0
+          ? `<span title="Auto tax from product" style="background:rgba(245,158,11,.18);color:var(--yellow);font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;font-family:var(--mono)">${taxPct}%</span>`
+          : `<span style="color:var(--text-muted);font-size:10px;font-family:var(--mono)">--</span>`}
+      </td>
+      <td class="bk-c bk-c-total" data-label="Line Total" style="padding:5px 8px;text-align:right;font-weight:700;color:var(--green);font-size:13px;font-family:var(--mono)">Rs.${lineTotal.toFixed(2)}</td>
+      <td class="bk-c bk-c-del" style="padding:5px 8px;text-align:center">
+        <button class="btn btn-ghost btn-xs" aria-label="Remove item" onclick="removeBookingItemRow(${i})" style="color:var(--red)"><i class="fa fa-trash"></i></button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  if (focusId) {
+    const el = document.getElementById(focusId);
+    if (el) {
+      el.focus();
+      if (selStart !== null && el.setSelectionRange) {
+        try { el.setSelectionRange(selStart, selEnd); } catch (_) { /* not a text-selectable input, ignore */ }
+      } else if (focusIsNumber) {
+        // setSelectionRange isn't available for number inputs — reassigning
+        // .value to its own current value is the standard cross-browser way
+        // to push the caret to the end, so the next digit typed appends
+        // after what's already there instead of landing at the front.
+        el.value = el.value;
+      }
+    }
+  }
+}
+
+// Product search autocomplete for booking rows
+// ── Product search dropdown (Order Booking) ───────────────────────
+// A single floating panel shared by every row, positioned with
+// getBoundingClientRect and rendered fixed at the very top of the page.
+// This sidesteps the table row stacking/overflow issues that made a
+// per-row absolutely-positioned dropdown get clipped or buried behind
+// the next row.
+let _bkProdActiveRow = null;
+
+function _bkProdFloatEl() {
+  let el = document.getElementById('bk-prod-float-drop');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'bk-prod-float-drop';
+    el.style.cssText = 'display:none;position:fixed;z-index:99999;'
+      + 'background:var(--bg-card);border:1px solid var(--border);border-radius:8px;'
+      + 'max-height:260px;overflow-y:auto;box-shadow:0 12px 32px rgba(0,0,0,.55)';
+    document.body.appendChild(el);
+    // Keep it glued to the input while the page scrolls/resizes, and close
+    // it if the row it belongs to has since scrolled out of view entirely.
+    window.addEventListener('scroll', () => { if (_bkProdActiveRow !== null) _bkProdReposition(); }, true);
+    window.addEventListener('resize', () => { if (_bkProdActiveRow !== null) _bkProdReposition(); });
+    // Keyboard opening/closing changes the visual viewport without a window resize.
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', () => { if (_bkProdActiveRow !== null) _bkProdReposition(); });
+      window.visualViewport.addEventListener('scroll', () => { if (_bkProdActiveRow !== null) _bkProdReposition(); });
+    }
+  }
+  return el;
+}
+
+function _bkProdReposition() {
+  const i = _bkProdActiveRow;
+  const inp = document.getElementById('bk-prod-input-'+i);
+  const drop = document.getElementById('bk-prod-float-drop');
+  if (!inp || !drop) return;
+  const r = inp.getBoundingClientRect();
+  const dropMaxHeight = 260;
+  // On a phone the on-screen keyboard covers the lower part of the screen.
+  // visualViewport is the part the user can actually see, so measure room
+  // against that — otherwise the list opens "below" the input but behind
+  // the keyboard and looks like nothing happened.
+  const vv = window.visualViewport;
+  const visTop = vv ? vv.offsetTop : 0;
+  const visBottom = vv ? (vv.offsetTop + vv.height) : window.innerHeight;
+  const spaceBelow = visBottom - r.bottom;
+  const spaceAbove = r.top - visTop;
+  // Fixed: this always opened the dropdown below the input, with no check
+  // for whether there was actually room on screen. Once several product
+  // rows had been added, the next empty row sat near the bottom of the
+  // page (or the viewport, on a shorter screen) — the dropdown would still
+  // try to open below it, landing off-screen and invisible, which looked
+  // exactly like "I can't add any more products" even though there was no
+  // real limit. Now it opens upward instead whenever there isn't enough
+  // room below but there is above.
+  const openUpward = spaceBelow < 160 && spaceAbove > spaceBelow;
+  drop.style.left = r.left + 'px';
+  drop.style.width = r.width + 'px';
+  if (openUpward) {
+    drop.style.top = '';
+    drop.style.bottom = (window.innerHeight - r.top + 4) + 'px';
+    drop.style.maxHeight = Math.min(dropMaxHeight, spaceAbove - 10) + 'px';
+  } else {
+    drop.style.bottom = '';
+    drop.style.top = (r.bottom + 4) + 'px';
+    drop.style.maxHeight = Math.min(dropMaxHeight, spaceBelow - 10) + 'px';
+  }
+}
+
+function _bkProdRenderRows(list) {
+  return list.map(p => {
+    const stock = _bkStockByProduct[p.id]||0;
+    const oos = stock <= 0;
+    const sc = oos?'var(--red)':stock<=(p.reorder_level||10)?'var(--yellow)':'var(--green)';
+    return `<div onmousedown="bkProdSelect(${_bkProdActiveRow},${p.id})" style="display:flex;align-items:center;gap:10px;padding:9px 14px;cursor:${oos?'not-allowed':'pointer'};border-bottom:1px solid var(--border);${oos?'opacity:.55':''}" onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background=''">
+      <span style="font-size:18px;flex-shrink:0">📦</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
+        <div style="font-size:10px;color:var(--text-muted);font-family:var(--mono)">${p.sku||'—'}${p.barcode?' · '+p.barcode:''}</div>
+      </div>
+      <div style="text-align:right;flex-shrink:0">
+        <div style="font-size:13px;font-weight:800;color:${sc}">${oos?'—':stock}</div>
+        <div style="font-size:9px;color:${oos?'var(--red)':'var(--text-muted)'}">${oos?'out of stock':'in stock'}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function bkProdSearch(i, q) {
+  _bkProdActiveRow = i;
+  const drop = _bkProdFloatEl();
+  const lc = (q||'').toLowerCase().trim();
+  if (!lc) { drop.style.display='none'; return; }
+  const rank = (p) => {
+    const name = (p.name||'').toLowerCase(), sku = (p.sku||'').toLowerCase(), bc = (p.barcode||'').toLowerCase();
+    if (name.startsWith(lc) || sku.startsWith(lc)) return 0;   // starts-with → top of the list
+    if (name.includes(lc) || sku.includes(lc) || bc.includes(lc)) return 1;
+    return -1; // no match
+  };
+  const results = _bkProductCache
+    .map(p => ({ p, r: rank(p) }))
+    .filter(x => x.r >= 0)
+    .sort((a, b) => a.r - b.r || a.p.name.localeCompare(b.p.name))
+    .slice(0, 20)
+    .map(x => x.p);
+  _bkProdReposition();
+  drop.style.display='';
+  drop.innerHTML = results.length
+    ? _bkProdRenderRows(results)
+    : '<div style="padding:12px 14px;font-size:12px;color:var(--text-muted);text-align:center"><i class="fa fa-search-minus"></i> No product found</div>';
+}
+
+function bkProdSearchFocus(i) {
+  const inp = document.getElementById('bk-prod-input-'+i);
+  if (!inp || _bookingItems[i].productId) return;
+  _bkProdActiveRow = i;
+  if (!inp.value.trim()) {
+    if (!_bkProductCache.length) return;
+    const drop = _bkProdFloatEl();
+    _bkProdReposition();
+    drop.style.display='';
+    drop.innerHTML = _bkProdRenderRows(_bkProductCache.slice(0, 20));
+  } else {
+    bkProdSearch(i, inp.value);
+  }
+}
+
+function bkProdSelect(i, productId) {
+  const prod = _bkProductCache.find(p=>p.id===productId);
+  if (!prod) return;
+  const stock = _bkStockByProduct[productId] || 0;
+  if (stock <= 0) {
+    toast(`${prod.name} is out of stock and can't be added to this order.`, 'error');
+    bkProdDropClose();
+    return;
+  }
+  _bookingItems[i].productId = prod.id;
+  _bookingItems[i].name      = prod.name;
+  _bookingItems[i].rate      = Number(prod.selling_price)||0;
+  _bookingItems[i].ppc       = 1;
+  _bookingItems[i].icon      = '📦';
+  _bookingItems[i].taxPct    = Number(prod.tax_rate)||0;
+  _bookingItems[i].discPct   = Number(prod.discount_percent)||0;
+  bkProdDropClose();
+  renderBookingItemRows();
+  calcBookingTotals();
+  // Auto-focus the qty field — no extra click needed
+  setTimeout(()=>{
+    const qtyEl = document.getElementById('bk-qty-'+i);
+    if (qtyEl) { qtyEl.focus(); qtyEl.select(); }
+  }, 30);
+}
+
+function bkProdClear(i) {
+  _bookingItems[i] = { productId:'', name:'', rate:0, qty:0, cartons:0, ppc:1, taxPct:0, discPct:0 };
+  renderBookingItemRows();
+  calcBookingTotals();
+  setTimeout(()=>{ const el=document.getElementById('bk-prod-input-'+i); if(el){el.focus();el.value='';} },30);
+}
+
+function bkProdDropClose() {
+  const drop = document.getElementById('bk-prod-float-drop');
+  if (drop) drop.style.display='none';
+  _bkProdActiveRow = null;
+}
+
+function updateBookingItemStr(i, field, val) {
+  _bookingItems[i][field] = val;
+  renderBookingItemRows();
+  calcBookingTotals();
+}
+
+function onBookingProductChange(i, productId) {
+  const prod = DB.products.find(p=>p.id==productId);
+  if (prod) {
+    _bookingItems[i].productId = prod.id;
+    _bookingItems[i].name = prod.name;
+    _bookingItems[i].rate = prod.sellPrice||0;
+    _bookingItems[i].ppc = prod.piecesPerCarton||1;
+    _bookingItems[i].icon = prod.icon||'📦';
+    _bookingItems[i].taxPct = prod.tax||0;   // ← auto-load product tax
+    _bookingItems[i].discount = prod.discount||0;
+  } else {
+    _bookingItems[i] = { productId:'', name:'', rate:0, qty:_bookingItems[i].qty||0, cartons:0, ppc:1, taxPct:0 };
+  }
+  renderBookingItemRows();
+  calcBookingTotals();
+}
+
+function updateBookingItem(i, field, val) {
+  // Fixed: this used to store parseFloat(val) immediately — e.g. typing
+  // "12." parses to 12, and the very next re-render then rebuilt the input's
+  // value from that number, silently erasing the "." you just typed. So
+  // typing a decimal one character at a time (e.g. "12.5") never worked —
+  // you'd end up with "125" instead, because by the time you typed "5" the
+  // "." was already gone and the field just appended the digit. The raw
+  // string is now kept as typed; numbers are only parsed out of it where an
+  // actual calculation or limit check needs one, below and elsewhere.
+  _bookingItems[i][field] = val;
+  const item = _bookingItems[i];
+  const numVal = parseFloat(val) || 0;
+
+  if (field === 'discPct') {
+    if (numVal < 0) item.discPct = 0;
+    else if (numVal > 100) item.discPct = 100;
+  }
+
+  // Defensive re-check: stock can shift between opening the form and typing
+  // the quantity (another sale, another booking). Cap to what's actually
+  // available rather than letting the order go through with more than we have.
+  if (field === 'qty' && item.productId) {
+    const stock = _bkStockByProduct[item.productId] || 0;
+    if (stock <= 0) {
+      item.qty = 0;
+      toast('That product is out of stock — quantity can\'t be added.', 'error');
+    } else if (numVal > stock) {
+      item.qty = stock;
+      toast(`Only ${stock} in stock — quantity capped.`, 'warning');
+    }
+  }
+
+  // Once a quantity is typed against a picked product on the LAST row,
+  // automatically append a fresh empty row so the next product can be
+  // entered right away — no need to click "Add Item" every time.
+  const isLastRow = i === _bookingItems.length - 1;
+  if (field === 'qty' && isLastRow && item.productId && numVal > 0) {
+    _bookingItems.push({ productId:'', name:'', rate:0, qty:0, cartons:0, ppc:1, taxPct:0, discPct:0 });
+  }
+
+  renderBookingItemRows();
+  calcBookingTotals();
+}
+
+// Single source of truth for booking totals — used both to update the on-screen
+// summary (calcBookingTotals) and to build the exact payload sent to the API
+// (saveBooking), so what the user sees is always what actually gets saved.
+function computeBookingTotals() {
+  let baseAmount = 0, autoTaxAmt = 0, itemDiscAmt = 0;
+  _bookingItems.forEach(item => {
+    // Number(...) here for the same reason as in renderBookingItemRows —
+    // these fields can hold the raw in-progress string from the input
+    // (e.g. "12.") rather than an already-parsed number.
+    const qtyNum = Number(item.qty) || 0;
+    const cartonsNum = Number(item.cartons) || 0;
+    const rateNum = Number(item.rate) || 0;
+    const discPctNum = Number(item.discPct) || 0;
+    const tp = qtyNum + cartonsNum*(item.ppc||1);
+    const itemBase = tp*rateNum;
+    const prod = _bkProductCache.find(p => p.id == item.productId);
+    const taxPct = Number(prod?.tax_rate ?? item.taxPct) || 0;
+    const itemTax = itemBase*taxPct/100;
+    const discPct = discPctNum;
+    // Per-line discount, taken off this line's tax-inclusive price — mirrors
+    // SaleItem.line_discount on the backend and only affects this order,
+    // never the product's own saved price/rate.
+    const itemDisc = (itemBase+itemTax)*discPct/100;
+    baseAmount  += itemBase;
+    autoTaxAmt  += itemTax;
+    itemDiscAmt += itemDisc;
+  });
+
+  // Bill-level discount is now entered as a direct Rs. amount (not a
+  // percentage) — capped so it can never exceed what's left after line
+  // discounts, which would otherwise push the invoice total negative.
+  const billDiscInput = parseFloat(document.getElementById('bk-discount')?.value)||0;
+  const billDiscBase = Math.max(0, baseAmount + autoTaxAmt - itemDiscAmt);
+  const billDiscAmt = Math.round(Math.min(billDiscInput, billDiscBase) * 100) / 100;
+
+  const totalDiscount = Math.round((itemDiscAmt + billDiscAmt) * 100) / 100;
+  const total = baseAmount + autoTaxAmt - totalDiscount;
+
+  return { baseAmount, autoTaxAmt, itemDiscAmt, billDiscAmt, totalDiscount, total };
+}
+
+function calcBookingTotals() {
+  const { baseAmount, autoTaxAmt, itemDiscAmt, billDiscAmt, total } = computeBookingTotals();
+
+  const custId   = parseInt(document.getElementById('bk-customer')?.value)||0;
+  // Previous balance is shown for reference only — never added to this bill.
+  const prevBal  = custId ? (Number(_bkPrevBalanceLive)||0) : 0;
+
+  // ── Update tax label to show effective rate ────────────
+  const taxLabel = document.getElementById('bk-tax-pct-label');
+  if (taxLabel) {
+    const effectivePct = baseAmount > 0 ? (autoTaxAmt / baseAmount * 100) : 0;
+    taxLabel.textContent = effectivePct > 0 ? `(${effectivePct.toFixed(1)}% avg)` : '(no tax on items)';
+  }
+  // Show/hide auto tax row
+  const autoTaxRow = document.getElementById('bk-auto-tax-row');
+  if (autoTaxRow) autoTaxRow.style.display = autoTaxAmt > 0 ? '' : 'none';
+  // Show/hide the per-item discount row — only relevant once a line has one
+  const itemDiscRow = document.getElementById('bk-item-disc-row');
+  if (itemDiscRow) itemDiscRow.style.display = itemDiscAmt > 0 ? 'flex' : 'none';
+
+  const s   = v => 'Rs.' + v.toFixed(2);
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  set('bk-subtotal',      s(baseAmount));
+  set('bk-gst-val',       '+' + s(autoTaxAmt));
+  set('bk-item-disc-val', '-' + s(itemDiscAmt));
+  set('bk-disc-val',      '-' + s(billDiscAmt));
+  set('bk-total',          s(total));
+  set('bk-prev-bal-mini',  s(prevBal));
+}
+
+function _bkItemKeys(list) {
+  return list.map(i => [Number(i.product), Number(i.quantity), (Number(i.unit_price)||0).toFixed(2),
+                        (Number(i.discount_percent)||0).toFixed(2)].join('|')).sort().join(';');
+}
+
+async function saveBooking(status) {
+  if (_bkSaving) return;   // a second click while the first save is still running
+  const custId = parseInt(document.getElementById('bk-customer').value)||0;
+  if (!custId) { toast('Please select a customer!','error'); return; }
+  const validItems = _bookingItems.filter(i=>i.productId);
+  if (!validItems.length) { toast('Add at least one product!','error'); return; }
+
+  const bookDate  = document.getElementById('bk-date').value;
+  const payMethod = document.getElementById('bk-payment').value;
+  const notes     = document.getElementById('bk-notes').value;
+
+  // Bill-level discount only — per-line discounts travel on each item's own
+  // discount_percent below and the backend sums those in automatically.
+  const { billDiscAmt: discountAmount } = computeBookingTotals();
+
+  const items = validItems.map(i => {
+    const prod = _bkProductCache.find(p=>p.id==i.productId);
+    const tp = (Number(i.qty)||0)+(Number(i.cartons)||0)*(i.ppc||1);
+    return {
+      product: i.productId, quantity: tp, unit_price: Number(i.rate) || 0,
+      tax_percent: Number(prod?.tax_rate ?? i.taxPct) || 0,
+      discount_percent: Number(i.discPct) || 0,
+    };
+  });
+
+  // Opened an existing invoice and saved without changing anything → keep it
+  // exactly as it is: no new bill, no balance change, payments stay.
+  if (status !== 'draft' && _editingCompletedSaleId && _bkEditOriginal) {
+    const o = _bkEditOriginal;
+    const same = o.customer === custId
+      && o.credit === (payMethod === 'credit')
+      && Math.abs(o.billDisc - discountAmount) < 0.01
+      && o.notes.trim() === notes.trim()
+      && o.items === _bkItemKeys(items);
+    if (same) {
+      toast('No changes made — the invoice was kept exactly as it is.', 'success');
+      closeBookingForm();
+      return;
+    }
+  }
+
+  _bkSaving = true;
+  const saveBtn = document.querySelector('button[onclick="saveBooking(\'saved\')"]');
+  if (saveBtn) saveBtn.disabled = true;
+  try {
+    const warehouseId = await _ensureDefaultWarehouse();
+    const payload = {
+      warehouse: warehouseId, customer: custId, items,
+      discount_amount: discountAmount,
+      notes: `Order Booking${notes ? ' — '+notes : ''} (date: ${bookDate})`,
+    };
+
+    if (status === 'draft') {
+      // "Hold Invoice" — parks it with no stock/balance impact yet. Editing
+      // an already-held invoice updates it in place instead of making a
+      // second copy.
+      const sale = _editingBookingId
+        ? await SalesAPI.updateHold(_editingBookingId, payload)
+        : await SalesAPI.hold(payload);
+      toast(`Invoice held — ${sale.invoice_number}. Edit or finalize it anytime from the list.`, 'success');
+      closeBookingForm();
+      return;
+    }
+
+    // status === 'saved' → a real, completed sale.
+    let sale;
+    if (_editingCompletedSaleId) {
+      // In-place edit of an already-finalized invoice — same invoice_number,
+      // marked EDITED (not RETURNED). See SalesAPI.edit / edit_completed_sale.
+      sale = await SalesAPI.edit(_editingCompletedSaleId, { ...payload, is_credit_sale: payMethod === 'credit' });
+    } else if (_editingBookingId) {
+      // Save the edits back to the held invoice, then finalize it.
+      await SalesAPI.updateHold(_editingBookingId, payload);
+      sale = await SalesAPI.finalize(_editingBookingId, { is_credit_sale: payMethod === 'credit' });
+    } else {
+      sale = await SalesAPI.create({ ...payload, is_credit_sale: payMethod === 'credit' });
+    }
+    // A "Cash" booking is no longer auto-settled here — like a credit
+    // booking, it stays pending (UNPAID) until it's actually collected via
+    // Customer Collection in the evening. is_credit_sale above still records
+    // which one this was meant to be (drives the Cash/Credit label on the
+    // Collection sheet); it no longer controls whether a payment gets
+    // created automatically. This does NOT apply to the POS register
+    // checkout (processPayment) — a counter sale really is paid on the spot.
+    _slipsLoaded = false; // new/updated sale — Sale Slips list must refetch next time it's opened
+    toast(_editingCompletedSaleId
+      ? (sale.edit_unchanged ? 'No changes made — the invoice was kept exactly as it is.' : `Invoice updated — ${sale.invoice_number}`)
+      : `Booking saved! Invoice: ${sale.invoice_number}`, 'success');
+    closeBookingForm();
+  } catch (err) {
+    toast(err.message || 'Failed to save booking', 'error');
+  } finally {
+    _bkSaving = false;
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+async function editBooking(id) {
+  await newBookingForm(id);
+}
+
+async function deleteHeldBooking(id, invoiceNumber) {
+  if (!(await confirmModal(`Held invoice ${invoiceNumber||''} will be permanently deleted.`, { title: 'Delete Held Invoice?', confirmText: 'Delete Invoice' }))) return;
+  try {
+    await SalesAPI.remove(id);
+    toast('Held invoice deleted','warning');
+    renderBookingList();
+  } catch (err) {
+    toast(err.message || 'Failed to delete invoice', 'error');
+  }
+}
+
+async function cancelBooking(id) {
+  if (!(await confirmModal('Stock and customer balance will be restored via a full return.', { title: 'Cancel Booking?', confirmText: 'Cancel Booking', icon: 'fa-undo' }))) return;
+  try {
+    const sale = await SalesAPI.get(id);
+    const items = sale.items
+      .filter(i => (i.quantity - i.quantity_returned) > 0)
+      .map(i => ({ sale_item: i.id, quantity: i.quantity - i.quantity_returned }));
+    if (!items.length) { toast('Nothing left to cancel — already fully returned.', 'warning'); return; }
+    await SalesAPI.processReturn(id, { items, reason: 'Booking cancelled' });
+    renderBookingList();
+    toast('Booking cancelled — stock and balance restored','warning');
+  } catch (err) {
+    toast(err.message || 'Failed to cancel booking', 'error');
+  }
+}
+
+// Different from cancelBooking above: that keeps the invoice on record
+// with a 'returned' status. This restocks everything, zeroes this bill's
+// due off the customer's account, and DELETES the invoice outright — for
+// a wrongly-created/duplicate booking that shouldn't exist anywhere at
+// all afterwards. Irreversible.
+async function voidBooking(id, invoiceNumber) {
+  if (!(await confirmModal(
+    `Invoice ${invoiceNumber||''} will be permanently removed — its stock is restored and its due is cleared from the customer's account. This cannot be undone.`,
+    { title: 'Delete Invoice Completely?', confirmText: 'Delete Invoice', icon: 'fa-trash' }
+  ))) return;
+  try {
+    await SalesAPI.void(id);
+    renderBookingList();
+    toast('Invoice deleted — stock restored and balance cleared', 'warning');
+  } catch (err) {
+    toast(err.message || 'Failed to delete invoice', 'error');
+  }
+}
+
+async function renderBookingList() {
+  const q  = (document.getElementById('bk-search')?.value||'').toLowerCase();
+  const nq = (document.getElementById('bk-name-search')?.value||'').toLowerCase().trim();
+  const df = document.getElementById('bk-date-filter')?.value||'';
+
+  // Order Bookings are real Sale records under the hood (see saveBooking) —
+  // this list shows all sales, since every booking IS a sale.
+  const data = await SalesAPI.list({ search: q || nq || undefined, ordering: '-created_at', page_size: 200 });
+  let filtered = data.results || data;
+  if (df) filtered = filtered.filter(b => (b.created_at||'').slice(0,10) === df);
+
+  const statusMap = { completed:['badge-green','Confirmed'], returned:['badge-red','Cancelled'],
+    partially_returned:['badge-yellow','Partial Return'], cancelled:['badge-red','Cancelled'], draft:['badge-yellow','⏸ On Hold'],
+    edited:['badge-blue','✏️ Edited'] };
+
+  document.getElementById('booking-table-body').innerHTML = filtered.length
+    ? filtered.map(b=>{
+        const [badgeClass, label] = statusMap[b.status] || ['badge-gray', b.status];
+        const isHeld = b.status === 'draft';
+        return `
+        <tr${isHeld?' style="background:rgba(234,179,8,.05)"':''}>
+          <td class="td-mono" data-label="Invoice" style="color:var(--cyan)">${b.invoice_number}</td>
+          <td data-label="Date" style="font-size:12px">${(b.created_at||'').slice(0,10)}</td>
+          <td class="fw-700" data-label="Customer">${b.customer_name||'Walk-in'}</td>
+          <td data-label="Account No"><span class="badge badge-purple" style="font-family:var(--mono);font-size:11px">${b.customer?(accNo(b.customer, b.customer_account_no)):'—'}</span></td>
+          <td data-label="Items">${b.items.length} item(s)</td>
+          <td class="fw-700 text-green" data-label="Amount">Rs.${Number(b.total_amount).toFixed(2)}</td>
+          <td data-label="Prev Balance" class="${Number(b.previous_balance) < 0 ? 'text-green' : 'text-red'}">${Number(b.previous_balance) < 0 ? '(Advance) ' : ''}Rs.${Math.abs(Number(b.previous_balance)).toFixed(2)}</td>
+          <td class="fw-700 text-yellow" data-label="Net Payable">Rs.${(Number(b.total_amount)+Number(b.previous_balance)).toFixed(2)}</td>
+          <td data-label="Payment"><span class="badge badge-blue">${b.payment_status}</span></td>
+          <td data-label="Status"><span class="badge ${badgeClass}">${label}</span></td>
+          <td class="m-actions">
+            <div class="flex-gap">
+              <button class="btn btn-ghost btn-xs" onclick="viewOrder('${b.invoice_number}')" title="View"><i class="fa fa-eye"></i></button>
+              ${isHeld ? `
+                <button class="btn btn-ghost btn-xs" onclick="editBooking(${b.id})" style="color:var(--accent)" title="Edit held invoice"><i class="fa fa-pen"></i></button>
+                <button class="btn btn-ghost btn-xs" onclick="deleteHeldBooking(${b.id},'${b.invoice_number}')" style="color:var(--red)" title="Delete held invoice"><i class="fa fa-trash"></i></button>
+              ` : !['returned','cancelled'].includes(b.status) ? `
+                ${['completed','partially_returned','edited'].includes(b.status) ? `<button class="btn btn-ghost btn-xs" onclick="editCompletedSlipFromModal(${b.id})" style="color:var(--accent)" title="Edit invoice"><i class="fa fa-pen"></i></button>` : ''}
+                <button class="btn btn-ghost btn-xs" onclick="cancelBooking(${b.id})" style="color:var(--red)" title="Cancel / Return"><i class="fa fa-ban"></i></button>
+                <button class="btn btn-ghost btn-xs" onclick="voidBooking(${b.id},'${b.invoice_number}')" style="color:var(--red)" title="Delete invoice completely — restocks it, clears balance, removes it entirely"><i class="fa fa-trash"></i></button>
+              ` : ''}
+            </div>
+          </td>
+        </tr>`;
+      }).join('')
+    : `<tr><td colspan="11" style="text-align:center;padding:40px;color:var(--text-muted)">
+         <i class="fa fa-clipboard" style="font-size:32px;display:block;margin-bottom:10px"></i>No bookings found
+       </td></tr>`;
+}
+
+// ═══════════════════════════════════════════════════════
+// SALE SLIPS MODULE
+// (clearSaleSlipsFilters / renderSaleSlips are defined further below,
+// assigned onto window — kept as the single source of truth so there's
+// no duplicate/competing implementation silently overriding this one.)
+// ═══════════════════════════════════════════════════════
+let _slipsCache = [];
+let _slipsLoaded = false;
+
+function viewSlipDetail(id) {
+  const b = _slipsCache.find(x=>x.id===id);
+  if (!b) return;
+  document.getElementById('od-title').textContent = 'Sale Slip — '+b.invoice_number;
+  document.getElementById('order-detail-body').innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">CUSTOMER</div><div style="font-weight:600">${b.customer_name||'Walk-in'}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">ACCOUNT NO</div><div style="font-weight:700;color:var(--purple);font-family:var(--mono)">${b.customer?(accNo(b.customer, b.customer_account_no)):'—'}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">DATE</div><div style="font-weight:600">${(b.created_at||'').slice(0,10)}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">INVOICE</div><div style="font-weight:700;color:var(--cyan);font-family:var(--mono)">${b.invoice_number}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">PAYMENT</div><div style="font-weight:600">${(b.payments[0]?.method)||'—'}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);margin-bottom:3px">STATUS</div><span class="badge ${b.status==='completed'?'badge-green':b.status==='edited'?'badge-blue':'badge-red'}">${b.status==='edited'?'Edited':b.status}</span></div>
+    </div>
+    <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+    <table>
+      <thead><tr><th>Product</th><th>Rate</th><th>Qty</th><th>Amount</th></tr></thead>
+      <tbody>${b.items.filter(it => (it.quantity - Number(it.quantity_returned||0)) > 0).map(it=>{
+          // Only the remaining (non-returned) quantity/amount — a fully
+          // returned line is filtered out above entirely.
+          const netQty = it.quantity - Number(it.quantity_returned||0);
+          const netAmt = it.quantity ? Number(it.line_total) * (netQty / it.quantity) : 0;
+          return `<tr>
+          <td>📦 ${it.product_name||'—'}${Number(it.quantity_returned) > 0 ? `<div style="font-size:10px;color:var(--red)">${it.quantity_returned} returned</div>` : ''}</td>
+          <td>Rs.${Number(it.unit_price).toFixed(2)}</td>
+          <td class="fw-700">${netQty}</td>
+          <td class="fw-700 text-green">Rs.${netAmt.toFixed(2)}</td>
+        </tr>`;}).join('')}</tbody>
+    </table>
+    </div>
+    <div style="margin-top:16px;text-align:right">
+      ${Number(b.discount_amount)>0?`<div style="font-size:12px;color:var(--red);margin-bottom:4px">Discount: -Rs.${Number(b.discount_amount).toFixed(2)}</div>`:''}
+      ${Number(b.tax_amount)>0?`<div style="font-size:12px;color:var(--yellow);margin-bottom:4px">Tax: +Rs.${Number(b.tax_amount).toFixed(2)}</div>`:''}
+      <div style="font-size:16px;font-weight:800;margin-bottom:6px">Bill Total: Rs.${Number(b.total_amount).toFixed(2)}</div>
+      <div style="font-size:18px;font-weight:800;color:var(--yellow)">Due: Rs.${Number(b.due_amount).toFixed(2)}</div>
+    </div>
+    ${['returned','partially_returned'].includes(b.status) ? `<div style="font-size:11px;color:var(--text-muted);text-align:right;margin-top:-4px">Bill Total already reflects the return.</div>` : ''}
+    ${b.notes?`<div style="margin-top:12px;padding:10px;background:var(--bg-secondary);border-radius:6px;font-size:12px"><strong>Notes:</strong> ${b.notes}</div>`:''}
+    <div class="slip-detail-actions" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;justify-content:flex-end">
+      ${b.status === 'draft' ? `
+        <button class="btn btn-red btn-sm" onclick="deleteSlipFromModal(${b.id}, '${b.invoice_number}')"><i class="fa fa-trash"></i> Delete</button>
+        <button class="btn btn-ghost btn-sm" onclick="editSlipFromModal(${b.id})"><i class="fa fa-edit"></i> Edit</button>
+      ` : ['completed', 'partially_returned', 'edited'].includes(b.status) ? `
+        <button class="btn btn-red btn-sm" onclick="cancelSlipFromModal(${b.id})"><i class="fa fa-undo"></i> Cancel / Return</button>
+        <button class="btn btn-red btn-sm" onclick="voidSlipFromModal(${b.id}, '${b.invoice_number}')" title="Restocks it, clears the balance, and removes it completely — not kept as 'returned'"><i class="fa fa-trash"></i> Delete Invoice</button>
+        <button class="btn btn-ghost btn-sm" onclick="editCompletedSlipFromModal(${b.id})"><i class="fa fa-edit"></i> Edit Invoice</button>
+      ` : ''}
+      <button class="btn btn-accent btn-sm" onclick="printSingleSlipA4(${b.id})"><i class="fa fa-print"></i> ${_isPosTerminalSale(b) ? 'Print Slip (73mm)' : 'Print A4'}</button>
+    </div>`;
+  openModal('order-detail-modal');
+}
+
+// Held (DRAFT) invoices haven't touched stock or a customer's balance yet,
+// so they can be edited or fully deleted from here. Once finalized, the
+// backend refuses both — a completed/partially-returned sale instead gets
+// "Cancel / Return", which reuses the same full-return path as the Order
+// Booking list so stock and balance are restored correctly.
+function editSlipFromModal(id) {
+  closeModal('order-detail-modal');
+  navigate('booking');
+  editBooking(id);
+}
+
+async function deleteSlipFromModal(id, invoiceNumber) {
+  if (!(await confirmModal(`Held invoice ${invoiceNumber||''} will be permanently deleted.`, { title: 'Delete Held Invoice?', confirmText: 'Delete Invoice' }))) return;
+  try {
+    await SalesAPI.remove(id);
+    toast('Held invoice deleted', 'warning');
+    closeModal('order-detail-modal');
+    _slipsLoaded = false;
+    renderSaleSlips();
+  } catch (err) {
+    toast(err.message || 'Failed to delete invoice', 'error');
+  }
+}
+
+async function cancelSlipFromModal(id) {
+  if (!(await confirmModal('Stock and customer balance will be restored via a full return.', { title: 'Cancel Invoice?', confirmText: 'Cancel Invoice', icon: 'fa-undo' }))) return;
+  try {
+    const sale = await SalesAPI.get(id);
+    const items = sale.items
+      .filter(i => (i.quantity - i.quantity_returned) > 0)
+      .map(i => ({ sale_item: i.id, quantity: i.quantity - i.quantity_returned }));
+    if (!items.length) { toast('Nothing left to cancel — already fully returned.', 'warning'); return; }
+    await SalesAPI.processReturn(id, { items, reason: 'Cancelled from Sale Slips' });
+    closeModal('order-detail-modal');
+    _slipsLoaded = false;
+    renderSaleSlips();
+    toast('Invoice cancelled — stock and balance restored', 'warning');
+  } catch (err) {
+    toast(err.message || 'Failed to cancel invoice', 'error');
+  }
+}
+
+// Different from cancelSlipFromModal above: that one keeps the invoice on
+// record with a 'returned'/'partially_returned' status (still visible if
+// something filters for it). This one restocks everything, zeroes out
+// this bill's due on the customer's account, and DELETES the invoice
+// outright — for a wrongly-created/duplicate bill that shouldn't exist
+// anywhere at all: not in Sale Slips, not in Order Summary, not in the
+// Collection ledger, not in the Stock Report. Irreversible.
+async function voidSlipFromModal(id, invoiceNumber) {
+  if (!(await confirmModal(
+    `Invoice ${invoiceNumber||''} will be permanently removed — its stock is restored and its due is cleared from the customer's account. This cannot be undone.`,
+    { title: 'Delete Invoice Completely?', confirmText: 'Delete Invoice', icon: 'fa-trash' }
+  ))) return;
+  try {
+    await SalesAPI.void(id);
+    closeModal('order-detail-modal');
+    _slipsLoaded = false;
+    renderSaleSlips();
+    toast('Invoice deleted — stock restored and balance cleared', 'warning');
+  } catch (err) {
+    toast(err.message || 'Failed to delete invoice', 'error');
+  }
+}
+
+// A COMPLETED (or partially-returned) invoice has already moved stock and
+// touched the customer's balance/loyalty points. Editing it opens the same
+// booking form pre-filled with its items — on save, SalesAPI.edit() reverses
+// the old items' stock/balance/loyalty effects and reapplies the new ones on
+// the SAME Sale row: the invoice number never changes, and the invoice is
+// marked "Edited" rather than "Returned" (see edit_completed_sale on the
+// backend). Use "Cancel / Return" instead if the goal is an actual refund.
+async function editCompletedSlipFromModal(id) {
+  if (!(await confirmModal('Adjust the items below and save — the invoice number stays the same and it will be marked as Edited.', { title: 'Edit Invoice?', confirmText: 'Continue', icon: 'fa-pen' }))) return;
+
+  closeModal('order-detail-modal');
+  navigate('booking');
+  await newBookingForm(id, /* editCompletedInPlace */ true);
+}
+
+// Adapts a real Sale object (from the backend) into the field shape this
+// print template was originally written against, so the template body
+// below didn't need a full rewrite.
+function _adaptSaleForSlipPrint(sale) {
+  return {
+    id: sale.id,
+    invoice: sale.invoice_number,
+    date: (sale.created_at||'').slice(0,10),
+    customerName: sale.customer_name || 'Walk-in',
+    customerCnic: sale.customer_cnic || '',
+    customerAddress: sale.customer_address || '',
+    accountNo: sale.customer ? (accNo(sale.customer, sale.customer_account_no)) : '—',
+    paymentMethod: (sale.payments[0]?.method) || '—',
+    createdBy: '',
+    items: (sale.items||[])
+      .map(it => {
+        // Only what's still actually on the bill — an item that's been
+        // fully returned shouldn't print as a line at all, and a
+        // partially-returned one should only show its remaining quantity.
+        const netQty = it.quantity - Number(it.quantity_returned || 0);
+        return {
+          icon: '📦', name: it.product_name, qty: netQty, cartons: 0, ppc: 1,
+          rate: Number(it.unit_price), taxPct: Number(it.tax_percent),
+          discPct: Number(it.discount_percent)||0,
+        };
+      })
+      .filter(it => it.qty > 0),
+    discAmt: Number(sale.discount_amount),
+    discountPct: 0,
+    prevBal: Number(sale.previous_balance) || 0,
+    notes: sale.notes || '',
+    // The authoritative bill total — already net of any return, straight
+    // from the backend (see process_return in services.py). Used below
+    // instead of re-deriving the total from items, so the printed total
+    // always matches what Sale Slips/Collection/every other screen shows,
+    // to the cent, instead of drifting from a second, independent
+    // calculation.
+    totalAmount: Number(sale.total_amount),
+    verifyPath: sale.verify_path || '',
+  };
+}
+
+// ── BUILD A4 HTML for a single booking ──────────────────
+// ── BizFlow Labs footer (printed at the very end of every invoice) ──────────
+// Put the real BizFlow Labs Facebook page link here. While it is empty the Facebook
+// icon and name are still printed, just without a link.
+const BIZFLOW_FACEBOOK_URL = '';
+const BIZFLOW_WHATSAPP_NO  = '+923140620796';
+const BIZFLOW_LOGO_SRC = 'data:image/png;base64,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';
+
+// The "Order Booking (date: …)" text the app stores in notes is internal — never print it.
+// Anything the user typed as a real note is still printed.
+function _slipPrintNote(notes) {
+  return String(notes || '')
+    .replace(/^Order Booking\s*(—\s*)?/, '')
+    .replace(/\s*\(date:[^)]*\)\s*$/, '')
+    .trim();
+}
+
+function _bizflowFooterHtml() {
+  const fbIcon = '<svg width="20" height="20" viewBox="0 0 24 24" style="display:block"><path fill="#1877F2" d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>';
+  const waIcon = '<svg width="20" height="20" viewBox="0 0 24 24" style="display:block"><circle cx="12" cy="12" r="12" fill="#25D366"/><path d="M12 4.5a7.5 7.5 0 0 0-6.4 11.4L4.5 19.5l3.7-1a7.5 7.5 0 1 0 3.8-14z" fill="none" stroke="#fff" stroke-width="1.6"/><path d="M9.2 8.3c.2-.4.5-.4.7-.4h.5c.2 0 .4 0 .5.4l.7 1.6c.1.2 0 .4-.1.6l-.4.5c-.1.1-.1.3 0 .5.5.9 1.3 1.6 2.3 2 .2.1.4 0 .5-.1l.6-.7c.2-.2.4-.2.6-.1l1.5.7c.2.1.3.3.2.6-.2.8-1 1.4-1.9 1.4-2.8-.2-5-2.5-5.4-4.4-.1-.7.1-1.3.4-1.9z" fill="#fff"/></svg>';
+  const fbInner = `${fbIcon}<span style="margin-left:6px">BizFlow Labs</span>`;
+  const fb = BIZFLOW_FACEBOOK_URL
+    ? `<a href="${BIZFLOW_FACEBOOK_URL}" style="color:#000;text-decoration:none;display:inline-flex;align-items:center">${fbInner}</a>`
+    : fbInner;
+  // margin-top:auto pushes this to the bottom of the page (the invoice is a flex column).
+  return `<div class="bizflow-footer slip-atomic-block" style="margin-top:auto;margin-bottom:-6mm;padding-top:5mm">
+      <div style="display:flex;align-items:center;gap:8px;font-size:9px;color:#000;margin-bottom:2.5mm">
+        <span style="flex:1;border-top:1px solid #000"></span>
+        <span style="white-space:nowrap">Invoicing Company</span>
+        <span style="flex:1;border-top:1px solid #000"></span>
+      </div>
+      <div style="display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;justify-content:center;gap:28px;width:100%;color:#000">
+        <span style="display:flex;align-items:center"><img src="${BIZFLOW_LOGO_SRC}" style="height:6mm;width:auto;display:block" alt="BizFlow Labs"></span>
+        <span style="display:flex;align-items:center;font-size:12px;font-weight:700">${fb}</span>
+        <span style="display:flex;align-items:center;font-size:12px;font-weight:700">${waIcon}<span style="margin-left:6px">${BIZFLOW_WHATSAPP_NO}</span></span>
+      </div>
+    </div>`;
+}
+
+// "Print 2 on One Page" shrinks everything on each invoice by this factor, on top of
+// the Sale Slip font-size setting, so the half-page invoices don't look oversized.
+// 1 = same size as a single invoice, 0.8 = 20% smaller. Change this one number to taste.
+const TWO_UP_FONT_SCALE = 0.8;
+
+function buildSlipA4Html(rawSale, zoomMultiplier) {
+  const b = rawSale.invoice_number ? _adaptSaleForSlipPrint(rawSale) : rawSale;
+
+  const s = (typeof _companySettingsCache !== 'undefined' && _companySettingsCache) || {};
+  const storeName = s.company_name || 'SmartRetail Store';
+  const storeAddress = s.address || '';
+  const storePhone = s.phone || '';
+  const storeEmail = s.email || '';
+  const distName = s.distributor_name || '';
+  const distAddress = s.distributor_address || '';
+  const distPhone = [s.distributor_phone, s.distributor_email].filter(Boolean).join(' · ');
+  const ntn = s.tax_id || '';
+  const logoDataUrl = s.logo || '';
+  const footerNote = s.invoice_footer_note || '';
+
+  const logoBlock = logoDataUrl
+    ? `<img src="${logoDataUrl}" style="max-width:56px;max-height:46px;object-fit:contain">`
+    : `<span style="font-size:28px;line-height:1">🏪</span>`;
+
+  // `zoom` (not standard CSS but supported by every Chromium-based
+  // browser, which is what this app's print flow runs in) scales the
+  // WHOLE slip — every hardcoded px font-size, padding, and border below
+  // — together in one shot. That's what makes ssSettings.fontScale a
+  // real "change it in Settings, not in code" control instead of having
+  // to hunt down and hand-edit every explicit font-size value in this
+  // template one by one.
+  const fontScale = (Number(ssSettings.fontScale) || 1) * (Number(zoomMultiplier) || 1);
+
+  // Independent of fontScale above — this ONLY bumps the "Product Name"
+  // cell text in the items table (the actual name in each row), not the
+  // header label, not any other column, not the rest of the slip. It
+  // still gets multiplied by the overall `zoom` too (that's unavoidable —
+  // zoom scales the whole box), but relative to everything else on the
+  // page it stays bigger by exactly this factor.
+  const productNameFontScale = Number(ssSettings.productNameFontScale) || 1;
+  const productNameFontSize = (9.5 * productNameFontScale).toFixed(2);
+
+  return `<div class="a4-doc" style="page-break-before:always;margin:0;padding:10mm 12mm;box-sizing:border-box;font-size:11px;zoom:${fontScale};--slip-zoom:${fontScale};display:flex !important;flex-direction:column;min-height:calc((100vh - 1mm) / ${fontScale})">
+    <!-- ═══ MAIN HEADER ═══ -->
+    <div style="display:flex;align-items:flex-start;gap:10px;border-bottom:2px solid #000;padding-bottom:4mm;margin-bottom:3mm">
+      ${ssSettings.showCompanyLogo ? `<div style="width:60px;height:50px;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+        ${logoBlock}
+      </div>` : ''}
+      <div>
+        <div style="font-size:15px;font-weight:900;color:#000;letter-spacing:-0.3px;line-height:1.1;margin-bottom:4px">${storeName}</div>
+        <div style="font-size:9px;color:#000;line-height:1.7">
+          ${distName    ? `<div><span style="color:#555">Distributor Name:</span> <strong>${distName}</strong></div>` : ''}
+          ${(storePhone||distPhone) ? `<div><span style="color:#555">Phone No:</span> <strong>${storePhone||distPhone}</strong></div>` : ''}
+          ${(storeAddress||distAddress) ? `<div><span style="color:#555">Address:</span> <strong>${storeAddress||distAddress}</strong></div>` : ''}
+          ${ntn ? `<div><span style="color:#555">NTN No:</span> <strong>${ntn}</strong></div>` : ''}
+        </div>
+      </div>
+      ${(b.verifyPath && s.show_invoice_qr !== false) ? `<div style="margin-left:auto;flex-shrink:0;text-align:center">
+        <img src="${window.location.origin}${b.verifyPath}qr.png" alt="Scan to verify" style="width:22mm;height:22mm;display:block">
+        <div style="font-size:7px;color:#000;margin-top:1px;line-height:1.2">Scan to verify invoice</div>
+      </div>` : ''}
+    </div>
+
+    <!-- ═══ BILL TO + INVOICE DETAILS ═══ -->
+    <div class="slip-atomic-block" style="display:flex;gap:0;margin-bottom:3mm;border:1px solid #000;border-radius:4px;overflow:hidden">
+      <!-- BILL TO -->
+      <div style="flex:1.3;padding:3mm 4mm;border-right:1px solid #000">
+        <div style="font-size:9.5px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:#000;background:#d9d9d9;padding:2px 5px;margin:-3mm -4mm 2mm;display:block">BILL TO</div>
+        <div style="font-size:12px;font-weight:900;color:#000;margin-bottom:2px">${b.customerName}</div>
+        ${(ssSettings.showCustomerDetails && b.customerCnic) ? `<div style="display:flex;gap:6px;margin-bottom:2px;font-size:9.5px;color:#000">
+          <span style="min-width:68px;font-size:8.5px;color:#444">CNIC:</span>
+          <strong style="color:#000;font-family:monospace">${b.customerCnic}</strong>
+        </div>` : ''}
+        ${(ssSettings.showCustomerDetails && b.customerAddress) ? `<div style="display:flex;gap:6px;margin-bottom:2px;font-size:9.5px;color:#000">
+          <span style="min-width:68px;font-size:8.5px;color:#444">Address:</span>
+          <strong style="color:#000;font-weight:600">${b.customerAddress}</strong>
+        </div>` : ''}
+        <div style="display:flex;gap:6px;margin-bottom:2px;font-size:9.5px;color:#000">
+          <span style="min-width:68px;font-size:8.5px;color:#444">Account No:</span>
+          <strong style="color:#000;font-family:monospace">${b.accountNo||'—'}</strong>
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:2px;font-size:9.5px;color:#000">
+          <span style="min-width:68px;font-size:8.5px;color:#444">Date:</span>
+          <strong style="color:#000">${b.date}</strong>
+        </div>
+        ${ssSettings.showPaymentMethod ? `<div style="display:flex;gap:6px;font-size:9.5px;color:#000">
+          <span style="min-width:68px;font-size:8.5px;color:#444">Payment:</span>
+          <strong style="color:#000">${b.paymentMethod||'—'}</strong>
+        </div>` : ''}
+      </div>
+      <!-- INVOICE INFO -->
+      <div style="min-width:42mm;padding:3mm 4mm">
+        <div style="font-size:9.5px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:#000;background:#d9d9d9;padding:2px 5px;margin:-3mm -4mm 2mm;display:block;text-align:right">INVOICE DETAILS</div>
+        <div style="font-size:14px;font-weight:900;color:#000;letter-spacing:0.3px;text-align:right">${b.invoice}</div>
+      </div>
+    </div>
+
+    <!-- ═══ ITEMS TABLE ═══ -->
+    <div style="font-size:9.5px;font-weight:800;color:#000;text-transform:uppercase;letter-spacing:0.08em;border-left:3px solid #000;padding-left:5px;margin-bottom:2mm">Purchased Items</div>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:3mm">
+      <thead>
+        <tr>
+          <th style="padding:5px 5px;text-align:left;background:#d9d9d9 !important;color:#000 !important;font-size:10px;font-weight:700">#</th>
+          <th style="padding:5px 5px;text-align:left;background:#d9d9d9 !important;color:#000 !important;font-size:10px;font-weight:700">PRODUCT NAME</th>
+          <th style="padding:5px 5px;text-align:center;background:#d9d9d9 !important;color:#000 !important;font-size:10px;font-weight:700">PIECES</th>
+          <th style="padding:5px 5px;text-align:right;background:#d9d9d9 !important;color:#000 !important;font-size:10px;font-weight:700">UNIT PRICE</th>
+          ${ssSettings.showSubtotal ? `<th style="padding:5px 5px;text-align:right;background:#d9d9d9 !important;color:#000 !important;font-size:10px;font-weight:700">BASE AMOUNT</th>` : ''}
+          ${ssSettings.showTax ? `<th style="padding:5px 5px;text-align:center;background:#d9d9d9 !important;color:#000 !important;font-size:10px;font-weight:700">TAX%</th>` : ''}
+          ${(ssSettings.showTax && ssSettings.showTaxAmount) ? `<th style="padding:5px 5px;text-align:right;background:#d9d9d9 !important;color:#000 !important;font-size:10px;font-weight:700">TAX AMT</th>` : ''}
+          ${ssSettings.showDiscount ? `<th style="padding:5px 5px;text-align:center;background:#d9d9d9 !important;color:#000 !important;font-size:10px;font-weight:700">DISC%</th>` : ''}
+          <th style="padding:5px 5px;text-align:right;background:#d9d9d9 !important;color:#000 !important;font-size:10px;font-weight:700">TOTAL</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${b.items.map((it,i)=>{
+          const tp=(it.qty||0)+(it.cartons||0)*(it.ppc||1);
+          const itemTaxPct = it.taxPct || 0;
+          const itemDiscPct = it.discPct || 0;
+          const baseAmt = tp*(it.rate||0);
+          const taxAmt  = baseAmt * itemTaxPct / 100;
+          const lineDiscAmt = (baseAmt+taxAmt) * itemDiscPct / 100;
+          const totalAmt = baseAmt + taxAmt - lineDiscAmt;
+          const bg = i%2===1?'#f4f4f4':'#fff';
+          return `<tr>
+            <td style="padding:5px 5px;border-bottom:1px solid #ddd;font-size:9.5px;font-weight:700;color:#000;background:${bg}">${i+1}</td>
+            <td style="padding:5px 5px;border-bottom:1px solid #ddd;font-size:${productNameFontSize}px;font-weight:700;color:#000;background:${bg}">${it.icon||''} ${it.name||'—'}</td>
+            <td style="padding:5px 5px;border-bottom:1px solid #ddd;font-size:10px;font-weight:700;color:#000;text-align:center;background:${bg}">${tp}</td>
+            <td style="padding:5px 5px;border-bottom:1px solid #ddd;font-size:9.5px;font-weight:600;color:#000;text-align:right;background:${bg}">Rs. ${(it.rate||0).toFixed(2)}</td>
+            ${ssSettings.showSubtotal ? `<td style="padding:5px 5px;border-bottom:1px solid #ddd;font-size:10px;font-weight:700;color:#000;text-align:right;background:${bg}">Rs. ${baseAmt.toFixed(2)}</td>` : ''}
+            ${ssSettings.showTax ? `<td style="padding:5px 5px;border-bottom:1px solid #ddd;font-size:9.5px;text-align:center;background:${bg};color:${itemTaxPct>0?'#8b0000':'#999'}">${itemTaxPct>0?itemTaxPct+'%':'—'}</td>` : ''}
+            ${(ssSettings.showTax && ssSettings.showTaxAmount) ? `<td style="padding:5px 5px;border-bottom:1px solid #ddd;font-size:10px;font-weight:700;color:${taxAmt>0?'#8b0000':'#999'};text-align:right;background:${bg}">${taxAmt>0?'Rs. '+taxAmt.toFixed(2):'—'}</td>` : ''}
+            ${ssSettings.showDiscount ? `<td style="padding:5px 5px;border-bottom:1px solid #ddd;font-size:9.5px;text-align:center;background:${bg};color:${itemDiscPct>0?'#16a34a':'#999'}">${itemDiscPct>0?itemDiscPct+'%':'—'}</td>` : ''}
+            <td style="padding:5px 5px;border-bottom:1px solid #ddd;font-size:10px;font-weight:800;color:#000;text-align:right;background:${bg}">Rs. ${totalAmt.toFixed(2)}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+
+    <!-- ═══ TOTALS ═══ -->
+    <div class="slip-atomic-block" style="display:flex;justify-content:flex-end;margin-bottom:3mm">
+      <div style="width:66mm;border:1px solid #000;border-radius:4px;overflow:hidden;font-size:10.5px">
+        ${(()=>{
+          // Recalculate from items for print accuracy
+          const subtotalBase = b.items.reduce((s,it)=>{ const tp=(it.qty||0)+(it.cartons||0)*(it.ppc||1); return s+tp*(it.rate||0); },0);
+          const totalTaxAmt  = b.items.reduce((s,it)=>{ const tp=(it.qty||0)+(it.cartons||0)*(it.ppc||1); const taxPct=it.taxPct||0; return s+tp*(it.rate||0)*taxPct/100; },0);
+          const hasTax       = totalTaxAmt > 0;
+          // Split the combined discount (b.discAmt = every line's own Disc% +
+          // the overall Bill Discount %, exactly as the backend sums them)
+          // back into its two parts, so each shows as its own line — same
+          // breakdown as the Order Booking screen.
+          const itemDiscAmt  = Math.round(b.items.reduce((s,it)=>{
+            const tp=(it.qty||0)+(it.cartons||0)*(it.ppc||1);
+            const lineBase = tp*(it.rate||0);
+            const lineTax  = lineBase*(it.taxPct||0)/100;
+            // Round each line's own discount to the cent here too — this is
+            // exactly how the backend rounds every SaleItem.line_discount
+            // individually before summing, so this total lines up with the
+            // real stored figure to the cent instead of drifting off it.
+            return s + Math.round((lineBase+lineTax)*(it.discPct||0)/100 * 100) / 100;
+          },0) * 100) / 100;
+          // Rounded to the cent, then compared with a half-cent margin —
+          // between float drift on the client and the backend's stored
+          // Decimal, "> 0" alone could let a sub-cent sliver through and
+          // print a ghost "Bill Discount (0.0%) -Rs.0.00" line.
+          const billDiscAmt  = Math.round(Math.max(0, (b.discAmt||0) - itemDiscAmt) * 100) / 100;
+          // Use the authoritative, already-return-adjusted total straight
+          // from the backend when available (real invoices always have
+          // it — see _adaptSaleForSlipPrint) rather than re-deriving it
+          // from items, so this always matches Sale Slips/Collection to
+          // the cent instead of two independent calculations drifting
+          // apart after a partial return.
+          const grandTotal   = (typeof b.totalAmount === 'number')
+            ? b.totalAmount
+            : subtotalBase + totalTaxAmt - itemDiscAmt - billDiscAmt;
+          return `
+        ${ssSettings.showSubtotal ? `<div style="display:flex;justify-content:space-between;padding:4px 8px;border-bottom:1px solid #ddd;color:#000"><span>Base Amount</span><span style="font-weight:600">Rs. ${subtotalBase.toFixed(2)}</span></div>` : ''}
+        ${(ssSettings.showTax && hasTax) ? `<div style="display:flex;justify-content:space-between;padding:4px 8px;border-bottom:1px solid #ddd;color:#8b0000"><span>Sale Tax/GST</span><span style="font-weight:600">+ Rs. ${totalTaxAmt.toFixed(2)}</span></div>` : ''}
+        ${(ssSettings.showDiscount && itemDiscAmt>0.005)?`<div style="display:flex;justify-content:space-between;padding:4px 8px;border-bottom:1px solid #ddd;color:#16a34a"><span>Item Discounts</span><span style="font-weight:600">- Rs. ${itemDiscAmt.toFixed(2)}</span></div>`:''}
+        ${(ssSettings.showDiscount && billDiscAmt>0.005)?`<div style="display:flex;justify-content:space-between;padding:4px 8px;border-bottom:1px solid #ddd;color:#16a34a"><span>Bill Discount</span><span style="font-weight:600">- Rs. ${billDiscAmt.toFixed(2)}</span></div>`:''}
+        <div style="display:flex;justify-content:space-between;padding:6px 8px;background:#d9d9d9;color:#000;font-size:13px;font-weight:900"><span>BILL TOTAL</span><span>Rs. ${grandTotal.toFixed(2)}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:4px 8px;border-bottom:1px solid #ddd;color:#000;font-weight:600"><span>${(b.prevBal||0)<0?'Previous Advance / Credit':'Previous Balance'}</span><span>Rs. ${Math.abs(b.prevBal||0).toFixed(2)}</span></div>`;
+        })()}
+      </div>
+    </div>
+
+    ${_slipPrintNote(b.notes)?`<div class="slip-atomic-block" style="margin-bottom:3mm;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:9.5px;color:#000"><strong>Notes:</strong> ${_slipPrintNote(b.notes)}</div>`:''}
+
+    
+    <!-- ═══ FOOTER ═══ -->
+    ${(ssSettings.showFooterNotes && footerNote) ? `<div class="slip-atomic-block" style="margin-top:5mm;text-align:center;font-size:9.5px;color:#333;font-style:italic">${footerNote}</div>` : ''}
+    <div class="slip-footer" style="margin-top:4mm;display:flex;justify-content:space-between;font-size:8.5px;color:#555;border-top:1px solid #ccc;padding-top:3mm">
+      <span>SmartRetail ERP — Order Booking System</span>
+      <span>${b.invoice} · Printed: ${new Date().toLocaleString()}</span>
+    </div>
+    ${_bizflowFooterHtml()}
+  </div>`;
+}
+
+// style.css has a GLOBAL "@page { margin: 12mm 0 0 0 }" (breathing room for page 2+ of
+// long reports). For invoices that is wrong: every invoice is exactly one page, so on
+// page 2, 3, 4... the invoice started 12mm LOWER than on page 1 — which is also what
+// pushed its footer onto yet another page. With "2 pages per sheet" it showed as the
+// left invoice starting higher than the right one. @page can't be overridden with a
+// new <style> tag (the browser keeps using the original rule), so we change the
+// original rule itself while the invoices print, and put it back afterwards.
+// Returns a function that restores the previous margins.
+function _setPageMargins(value) {
+  const saved = [];
+  for (const sheet of document.styleSheets) {
+    let rules;
+    try { rules = sheet.cssRules; } catch (_) { continue; }
+    for (const r of rules) {
+      if (r.type === CSSRule.PAGE_RULE) {
+        saved.push([r, r.style.getPropertyValue('margin'), r.style.getPropertyPriority('margin')]);
+        r.style.setProperty('margin', value, 'important');
+      }
+    }
+  }
+  return () => saved.forEach(([r, v, pr]) => r.style.setProperty('margin', v, pr));
+}
+
+async function printSingleSlipA4(id) {
+  // Always print from the server's CURRENT figures — not the copy loaded when
+  // the page opened — so a pending balance cleared since then (Previous
+  // Balance) and any new payment are what the slip shows.
+  let b = null;
+  try { b = await SalesAPI.get(id); } catch (_) { /* offline: fall back below */ }
+  if (b) { const i = _slipsCache.findIndex(x => x.id === id); if (i >= 0) _slipsCache[i] = b; }
+  else b = _slipsCache.find(x=>x.id===id);
+  if (!b) { toast('Booking not found','error'); return; }
+  if (_isPosTerminalSale(b)) { printThermalSlip(b, { reprint: true }); return; }   // POS Terminal bill → 73mm slip
+  const printArea = document.getElementById('print-area');
+  printArea.innerHTML = buildSlipA4Html(b);
+  const restoreMargins = _setPageMargins('0');
+  await animatedPrint('slip', printArea);
+  setTimeout(() => { printArea.style.display = 'none'; restoreMargins(); }, 1200);
+}
+
+async function printAllSlipsA4(mode) {
+  // Re-load first so every printed Previous Balance / Net Payable is live.
+  const dateFrom       = document.getElementById('ss-date-from')?.value||'';
+  const dateTo         = document.getElementById('ss-date-to')?.value||'';
+  const dateFilter     = dateFrom && dateTo ? (dateFrom === dateTo ? dateFrom : `${dateFrom} to ${dateTo}`)
+                       : dateFrom ? `From ${dateFrom}` : dateTo ? `Up to ${dateTo}` : '';
+  try {
+    _slipsCache = await _ssFetchSlips(dateFrom, dateTo);
+    _slipsRangeKey = dateFrom + '|' + dateTo;
+    _slipsLoaded = true;
+  } catch (_) { /* offline: print what is already loaded */ }
+  const timeFromF      = document.getElementById('ss-time-from')?.value||'';
+  const timeToF        = document.getElementById('ss-time-to')?.value||'';
+  const statusFilter   = document.getElementById('ss-status')?.value||'';
+  const nameFilter     = (document.getElementById('ss-name')?.value||'').toLowerCase().trim();
+  const invoiceFilter  = (document.getElementById('ss-invoice')?.value||'').toLowerCase().trim();
+  const usernameFilter = (document.getElementById('ss-username')?.value||'').toLowerCase().trim();
+  const areaFilter     = (document.getElementById('ss-area')?.value||'').toLowerCase().trim();
+
+  // Must match the exact same filters as the on-screen Sale Slips list
+  // (renderSaleSlips) — this used to only filter by date+name, so "Print
+  // All" printed every salesman's slips even when the table was filtered
+  // down to one username.
+  const slips = _slipsCache.filter(b =>
+    !_isPosTerminalSale(b) &&   // POS Terminal bills live under POS Terminal → POS Bills
+    (statusFilter ? b.status === statusFilter : (b.status!=='returned' && b.status!=='cancelled')) &&
+    _ssMatchDateTime(b, dateFrom, dateTo, timeFromF, timeToF) &&
+    (!nameFilter     || (b.customer_name||'').toLowerCase().includes(nameFilter)) &&
+    (!invoiceFilter  || (b.invoice_number||'').toLowerCase().includes(invoiceFilter) ||
+                        accNo(b.customer||'', b.customer_account_no).toLowerCase().includes(invoiceFilter)) &&
+    (!usernameFilter || (b.served_by_name||'').toLowerCase().includes(usernameFilter)) &&
+    (!areaFilter     || (b.customer_address||'').toLowerCase().includes(areaFilter))
+  );
+
+  if (!slips.length) { toast('No slips to print for selected filters','warning'); return; }
+
+  let html='';
+
+  if (mode==='summary') {
+    const adapted = slips.map(_adaptSaleForSlipPrint);
+    const totalBill = adapted.reduce((s,b)=>s+b.items.reduce((a,it)=>a+it.qty*it.rate,0),0);
+    const totalNet  = slips.reduce((s,b)=>s+Number(b.total_amount),0);
+    const s = _companySettingsCache || {};
+    const storeName = s.company_name || 'SmartRetail Store';
+    const storeAddress = s.address || '';
+
+    const cols = [
+      { key: 'showAccountNo',    label: 'Account',      align: 'left'  },
+      { key: 'showItems',        label: 'Items',        align: 'center' },
+      { key: 'showBillAmt',      label: 'Bill Amt',     align: 'right' },
+      { key: 'showPrevBalance',  label: 'Prev Bal',     align: 'right' },
+      { key: 'showNetPayable',   label: 'Net Payable',  align: 'right' },
+      { key: 'showPaymentMethod',label: 'Payment',      align: 'left'  },
+    ].filter(c => sssSettings[c.key] !== false);
+
+    const cellHtml = (b) => {
+      const map = {
+        showAccountNo:     `<td style="padding:6px 9px;font-family:monospace;color:#5b21b6">${b.customer?(accNo(b.customer, b.customer_account_no)):'—'}</td>`,
+        showItems:         `<td style="padding:6px 9px;text-align:center">${b.items.length}</td>`,
+        showBillAmt:       `<td style="padding:6px 9px;text-align:right">Rs.${Number(b.total_amount).toFixed(2)}</td>`,
+        showPrevBalance:   `<td style="padding:6px 9px;text-align:right;color:#dc2626">Rs.${Number(b.due_amount).toFixed(2)}</td>`,
+        showNetPayable:    `<td style="padding:6px 9px;text-align:right;font-weight:700;color:#b45309">Rs.${Number(b.total_amount).toFixed(2)}</td>`,
+        showPaymentMethod: `<td style="padding:6px 9px">${(b.payments[0]?.method)||'—'}</td>`,
+      };
+      return cols.map(c => map[c.key]).join('');
+    };
+
+    const totalsRow = () => {
+      const map = {
+        showAccountNo:    `<td style="padding:8px 9px"></td>`,
+        showItems:        `<td style="padding:8px 9px"></td>`,
+        showBillAmt:      `<td style="padding:8px 9px;text-align:right">Rs.${totalBill.toFixed(2)}</td>`,
+        showPrevBalance:  `<td style="padding:8px 9px;text-align:right">—</td>`,
+        showNetPayable:   `<td style="padding:8px 9px;text-align:right">Rs.${totalNet.toFixed(2)}</td>`,
+        showPaymentMethod:`<td style="padding:8px 9px"></td>`,
+      };
+      return cols.map(c => map[c.key]).join('');
+    };
+
+    html = `<div class="a4-doc">
+      <div class="a4-header">
+        <div>
+          <div class="a4-logo-name">🏪 ${storeName}</div>
+          ${storeAddress ? `<div style="font-size:11px;color:#555;margin-top:3px">${storeAddress}</div>` : ''}
+        </div>
+        <div class="a4-store-info">
+          <strong style="font-size:15px">DAILY ORDER SUMMARY</strong><br>
+          Date: <strong>${dateFilter||'All Dates'}</strong><br>
+          Printed: ${new Date().toLocaleString()}
+        </div>
+      </div>
+      <div style="font-size:16px;font-weight:800;color:#000;margin-bottom:5mm">
+        📋 Order Booking Summary — ${dateFilter||'All Dates'}
+      </div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:5mm">
+        <thead>
+          <tr>
+            <th style="padding:7px 9px;text-align:left;background:#d9d9d9 !important;color:#000 !important;font-size:11px">#</th>
+            <th style="padding:7px 9px;text-align:left;background:#d9d9d9 !important;color:#000 !important;font-size:11px">Invoice</th>
+            <th style="padding:7px 9px;text-align:left;background:#d9d9d9 !important;color:#000 !important;font-size:11px">Customer</th>
+            ${cols.map(c=>`<th style="padding:7px 9px;text-align:${c.align};background:#d9d9d9 !important;color:#000 !important;font-size:11px">${c.label}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody style="font-size:11px">
+          ${slips.map((b,i)=>`<tr style="background:${i%2?'#f9f9f9':'#fff'}">
+            <td style="padding:6px 9px">${i+1}</td>
+            <td style="padding:6px 9px;font-family:monospace">${b.invoice_number}</td>
+            <td style="padding:6px 9px;font-weight:700">${b.customer_name||'Walk-in'}</td>
+            ${cellHtml(b)}
+          </tr>`).join('')}
+        </tbody>
+        <tfoot>
+          <tr style="background:#d9d9d9 !important;color:#000 !important;font-weight:700;font-size:12px">
+            <td colspan="3" style="padding:8px 9px">TOTALS — ${slips.length} order${slips.length!==1?'s':''}</td>
+            ${totalsRow()}
+          </tr>
+        </tfoot>
+      </table>
+      <div style="display:flex;justify-content:flex-end;margin-bottom:5mm">
+        <div style="background:#fef3c7;border:2px solid #f59e0b;border-radius:8px;padding:10px 20px;text-align:right;min-width:260px">
+          <div style="font-size:11px;color:#92400e;font-weight:600;letter-spacing:.03em;text-transform:uppercase">Total Net Payable</div>
+          <div style="font-size:22px;font-weight:900;color:#000">Rs. ${totalNet.toFixed(2)}</div>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:#999;border-top:1px solid #eee;padding-top:4mm;margin-top:4mm">
+        <span>SmartRetail ERP — Daily Order Summary</span>
+        <span>Date: ${dateFilter||'All'} | Printed: ${new Date().toLocaleDateString()}</span>
+      </div>
+    </div>`;
+  } else if (mode === 'landscape2up') {
+    // Two REAL, full-width invoices side-by-side on one physical landscape
+    // sheet — not the browser's own "2 pages per sheet" print option,
+    // which just photographically shrinks two already-built portrait
+    // pages down to fit (which is why increasing the on-page font size
+    // barely showed up after that shrink). Here the page itself is
+    // authored as landscape and each invoice only ever has to fill half
+    // of it, so the printed text stays at its real, legible size.
+    let pairHtml = '';
+    for (let i = 0; i < slips.length; i += 2) {
+      const left = buildSlipA4Html(slips[i], TWO_UP_FONT_SCALE);
+      const right = slips[i + 1] ? buildSlipA4Html(slips[i + 1], TWO_UP_FONT_SCALE) : '<div class="a4-doc" style="visibility:hidden"></div>';
+      pairHtml += `<div class="a4-landscape-pair">${left}${right}</div>`;
+    }
+    html = pairHtml;
+  } else {
+    html = slips.map(b=>buildSlipA4Html(b)).join('');
+  }
+
+  const printArea = document.getElementById('print-area');
+  printArea.innerHTML = html;
+
+  // @page is a global, page-level rule — it can't be scoped with a class
+  // selector like normal CSS, so switching just this one print to
+  // landscape means temporarily swapping in its own <style> tag rather
+  // than editing style.css's page-wide @page block (which every other
+  // print in the app also relies on staying portrait).
+  let landscapeStyleTag = null;
+  if (mode === 'landscape2up') {
+    landscapeStyleTag = document.createElement('style');
+    landscapeStyleTag.id = 'temp-landscape-page-style';
+    // FIXED-HEIGHT layout (no vh): A4 landscape is 210mm tall, minus 8mm margin
+    // top + 4mm bottom = 198mm printable. Each pair is locked to 196mm (2mm safety),
+    // so the BizFlow footer sits at the very end of the sheet and is shrunk (zoom .75) so it stays quiet,
+    // so it can NEVER spill onto a 2nd sheet. Both invoices stretch to that same
+    // height: header stays at the top, BizFlow footer sits at the bottom of the
+    // sheet, in the same place on both halves — exactly like a normal full invoice.
+    // (100vh was the bug: in print it is not exactly the printable height, and
+    //  each invoice's own inline min-height of ~100vh made the pair taller than
+    //  the sheet, pushing the footer onto the next page.)
+    // `zoom` multiplies any height set on the element, so divide by --slip-zoom.
+    // !important on @page also beats style.css's 12mm top margin for page 2+.
+    landscapeStyleTag.textContent =
+      '@page { size: A4 landscape; margin: 8mm 8mm 4mm !important; } @page :first { margin: 8mm 8mm 4mm !important; } ' +
+      '@media print { ' +
+        'html, body { height: auto !important; } ' +
+        '.a4-landscape-pair { display: flex !important; align-items: stretch !important; gap: 8mm; ' +
+          'height: 196mm !important; min-height: 0 !important; max-height: 196mm !important; overflow-x: visible !important; overflow-y: clip !important; ' +
+          'box-sizing: border-box; break-inside: avoid !important; page-break-inside: avoid !important; ' +
+          'break-before: auto !important; page-break-before: auto !important; } ' +
+        '.a4-landscape-pair .a4-doc { display: flex !important; flex-direction: column; ' +
+          'height: calc(196mm / var(--slip-zoom, 1)) !important; min-height: 0 !important; ' +
+          'max-height: calc(196mm / var(--slip-zoom, 1)) !important; padding-bottom: 2.5mm !important; overflow-x: visible !important; overflow-y: clip !important; ' +
+          'box-sizing: border-box; margin: 0 !important; } ' +
+        '.a4-landscape-pair .a4-doc .bizflow-footer { margin-bottom: 0 !important; padding-top: 2mm !important; zoom: 0.75; } ' +
+      '}';
+    document.head.appendChild(landscapeStyleTag);
+  }
+
+  // Same top position on EVERY page/invoice (see _setPageMargins). Summary sheet keeps
+  // the normal page rules; 2-on-1 landscape uses 8mm all round, normal invoices 0.
+  const restoreMargins = (mode === 'summary') ? null : _setPageMargins(mode === 'landscape2up' ? '8mm 8mm 4mm' : '0');
+
+  // Printer animation plays first (it also gives the browser time to fully
+  // render all slip HTML), then the print dialog opens.
+  await animatedPrint('slip', printArea);
+  setTimeout(() => {
+    printArea.style.display = 'none';
+    if (landscapeStyleTag) landscapeStyleTag.remove();
+    if (restoreMargins) restoreMargins();
+  }, 1500);
+}
+
+// ── Sample booking data for demo ─────────────────────────
+(function seedBookings(){
+  const today = new Date().toISOString().split('T')[0];
+  if (!DB.orderBookings.length) {
+    DB.orderBookings.push({
+      id: 1001, invoice:'BK-00001', date:today,
+      customerId:1, customerName:'Ahmed Hassan', accountNo:'ACC-0001',
+      items:[
+        {productId:1,name:'Coca-Cola 330ml',icon:'🥤',rate:1.25,qty:12,cartons:1,ppc:24},
+        {productId:2,name:'Lays Classic Chips',icon:'🍟',rate:2.00,qty:0,cartons:1,ppc:20},
+      ],
+      subtotal:57, discAmt:0, taxAmt:0, total:57, prevBal:500,
+      netPayable:557, discountPct:0, taxPct:0,
+      paymentMethod:'credit', notes:'Regular weekly order',
+      status:'saved', createdAt: new Date().toLocaleString(),
+    });
+    DB.orderBookings.push({
+      id: 1002, invoice:'BK-00002', date:today,
+      customerId:3, customerName:'Muhammad Ali', accountNo:'ACC-0003',
+      items:[
+        {productId:5,name:'Dove Soap 100g',icon:'🧼',rate:1.50,qty:6,cartons:0,ppc:36},
+        {productId:9,name:'Shampoo 400ml',icon:'🧴',rate:5.99,qty:0,cartons:1,ppc:12},
+      ],
+      subtotal:80.88, discAmt:0, taxAmt:0, total:80.88, prevBal:1200,
+      netPayable:1280.88, discountPct:0, taxPct:0,
+      paymentMethod:'credit', notes:'',
+      status:'draft', createdAt: new Date().toLocaleString(),
+    });
+    bookingCounter = 3;
+  }
+})();
+
+// ═══════════════════════════════════════════════════════
+// SYSTEM SETTINGS
+// ═══════════════════════════════════════════════════════
+let _companySettingsCache = null;
+
+// Customer account number = company's account prefix (Settings) + 4-digit id, e.g. BCC-0001.
+// `stored` = the account_no saved on the customer (fixed when created); only used as a
+// fallback preview when it is missing.
+function accNo(id, stored) {
+  if (stored) return stored;
+  const p = ((typeof _companySettingsCache !== 'undefined' && _companySettingsCache && _companySettingsCache.account_prefix) || 'ACC-');
+  return p + String(id).padStart(4, '0');
+}
+
+async function renderBackupsList() {
+  const tbody = document.getElementById('backups-tbody');
+  if (!tbody) return;
+  try {
+    const data = await BackupsAPI.list();
+    const backups = data.results || data;
+    if (!backups.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:16px">No backups yet — run one now, or turn on Automatic Backups above.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = backups.map(b => `
+      <tr>
+        <td>${new Date(b.created_at).toLocaleString()}</td>
+        <td>${b.is_automatic ? '<span class="badge badge-blue">Auto</span>' : '<span class="badge badge-green">Manual</span>'}</td>
+        <td>${b.size_display}</td>
+        <td>${b.created_by_name || '—'}</td>
+        <td style="text-align:right"><a href="${b.file}" target="_blank" class="btn btn-ghost btn-xs" title="Download"><i class="fa fa-download"></i></a></td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--red);padding:16px">${err.message || 'Failed to load backups'}</td></tr>`;
+  }
+}
+
+async function runBackupNow() {
+  const btn = document.getElementById('run-backup-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Backing up...'; }
+  try {
+    await BackupsAPI.run();
+    toast('Backup created successfully!', 'success');
+    await renderBackupsList();
+  } catch (err) {
+    toast(err.message || 'Backup failed', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa fa-download"></i> Run Backup Now'; }
+  }
+}
+
+
+async function renderSettings() {
+  const s = await SettingsAPI.getCompany();
+  _companySettingsCache = s;
+  const setVal = (id, val) => { const el=document.getElementById(id); if(el) el.value = val||''; };
+  const setChecked = (id, val) => { const el=document.getElementById(id); if(el) el.value = val ? 'yes' : 'no'; };
+
+  setVal('set-storename', s.company_name);
+  setVal('set-address', s.address);
+  setVal('set-phone', s.phone);
+  setVal('set-email', s.email);
+  setVal('set-website', s.website);
+  setVal('set-taxrate', s.default_tax_percent);
+  setVal('set-lowstock', s.low_stock_threshold);
+  setVal('set-invoice-prefix', s.invoice_prefix);
+  setVal('set-account-prefix', s.account_prefix);
+  setVal('set-receipt-header', s.invoice_header_note);
+  setVal('set-receipt-footer', s.invoice_footer_note);
+  setChecked('set-show-tax', s.show_tax_on_receipt);
+  setChecked('set-show-qr', s.show_invoice_qr !== false);
+  setVal('set-ntn', s.tax_id||'');
+  setVal('set-dist-name', s.distributor_name);
+  setVal('set-dist-phone', s.distributor_phone);
+  setVal('set-dist-address', s.distributor_address);
+  setVal('set-dist-email', s.distributor_email);
+  _renderGeneralAuthStatus(!!s.general_auth_enabled);
+  renderBackupsList();
+
+  const cur = document.getElementById('set-currency');
+  if (cur) { Array.from(cur.options).forEach(o=>{ o.selected = o.value===s.default_currency||o.text===s.default_currency; }); }
+  // Logo preview
+  if (s.logo) {
+    const prev = document.getElementById('set-logo-preview');
+    if (prev) prev.innerHTML = `<img src="${s.logo}" style="width:100%;height:100%;object-fit:contain">`;
+  }
+  if (typeof updatePreview === 'function') updatePreview();
+}
+
+// ── General Auth (Settings) ─────────────────────────────────────────────
+function _renderGeneralAuthStatus(enabled) {
+  const st = document.getElementById('set-general-auth-status');
+  if (st) {
+    st.textContent = enabled ? '✔ General Auth password is set — General payments will ask for it.' : '✖ No password set — General payments are not protected.';
+    st.style.color = enabled ? 'var(--green)' : 'var(--yellow)';
+  }
+  const rm = document.getElementById('set-general-auth-remove');
+  if (rm) rm.style.display = enabled ? '' : 'none';
+}
+
+async function removeGeneralAuth() {
+  const ok = await confirmModal('Remove the General Auth password? General payments will no longer ask for a password.',
+    { title: 'Remove General Auth', confirmText: 'Remove', danger: true });
+  if (!ok) return;
+  try {
+    _companySettingsCache = await SettingsAPI.updateCompany({ general_auth_clear: true });
+    _renderGeneralAuthStatus(false);
+    toast('General Auth password removed', 'success');
+  } catch (err) {
+    toast(err.message || 'Could not remove password', 'error');
+  }
+}
+
+async function saveSettings() {
+  const g = id => document.getElementById(id)?.value||'';
+  const payload = {
+    company_name: g('set-storename'),
+    address: g('set-address'),
+    phone: g('set-phone'),
+    email: g('set-email'),
+    website: g('set-website'),
+    default_tax_percent: parseFloat(g('set-taxrate'))||0,
+    default_currency: g('set-currency'),
+    low_stock_threshold: parseInt(g('set-lowstock'))||10,
+    invoice_prefix: g('set-invoice-prefix') || 'INV-',
+    account_prefix: g('set-account-prefix').trim() || 'ACC-',
+    invoice_header_note: g('set-receipt-header'),
+    invoice_footer_note: g('set-receipt-footer'),
+    show_tax_on_receipt: g('set-show-tax') === 'yes',
+    show_invoice_qr: g('set-show-qr') !== 'no',
+    tax_id: g('set-ntn'),
+    distributor_name: g('set-dist-name'),
+    distributor_phone: g('set-dist-phone'),
+    distributor_address: g('set-dist-address'),
+    distributor_email: g('set-dist-email'),
+  };
+  // General Auth: only sent when a new password was typed (blank = keep current).
+  const newGeneralAuth = g('set-general-auth');
+  if (newGeneralAuth) payload.general_auth_password = newGeneralAuth;
+  try {
+    _companySettingsCache = await SettingsAPI.updateCompany(payload);
+    const ga = document.getElementById('set-general-auth'); if (ga) ga.value = '';
+    _renderGeneralAuthStatus(!!_companySettingsCache.general_auth_enabled);
+    if (typeof updatePreview === 'function') updatePreview();
+    toast('Settings saved successfully!', 'success');
+  } catch (err) {
+    toast(err.message || 'Failed to save settings', 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// SETTINGS — DANGER ZONE: START NEW BUSINESS
+// Three independent, single-purpose actions — each clears only its own
+// section (Products / Sale Slips / Customers) and leaves the rest alone.
+// ═══════════════════════════════════════════════════════
+const _clearDataConfig = {
+  'products': {
+    title: 'Clear Products',
+    message: 'This will permanently delete <strong>every product</strong> in the catalog, along with its stock/inventory data.',
+    apiCall: () => SettingsAPI.clearProducts(),
+    successMsg: 'All products have been cleared.',
+    refresh: () => { if (typeof renderProducts === 'function') renderProducts(); if (typeof renderDashboard === 'function') renderDashboard(); },
+  },
+  'sale-slips': {
+    title: 'Clear Sale Slips',
+    message: 'This will permanently delete <strong>every sale slip</strong> — invoices, payments &amp; returns.',
+    apiCall: () => SettingsAPI.clearSaleSlips(),
+    successMsg: 'All sale slips have been cleared.',
+    refresh: () => { if (typeof renderSaleSlips === 'function') renderSaleSlips(); if (typeof renderDashboard === 'function') renderDashboard(); },
+  },
+  'customers': {
+    title: 'Clear Customers',
+    message: 'This will permanently delete <strong>every customer</strong> record. Past sale slips are kept and simply become walk-in sales.',
+    apiCall: () => SettingsAPI.clearCustomers(),
+    successMsg: 'All customers have been cleared.',
+    refresh: () => { if (typeof renderCustomers === 'function') renderCustomers(); },
+  },
+};
+
+let _clearDataType = null;
+
+function openClearDataModal(type) {
+  _clearDataType = type;
+  const cfg = _clearDataConfig[type];
+  if (!cfg) return;
+  document.getElementById('clear-data-title').textContent = cfg.title;
+  document.getElementById('clear-data-message').innerHTML = cfg.message;
+  const input = document.getElementById('clear-data-confirm-input');
+  if (input) input.value = '';
+  openModal('clear-data-modal');
+  setTimeout(() => input?.focus(), 60);
+}
+
+async function submitClearData() {
+  const cfg = _clearDataConfig[_clearDataType];
+  if (!cfg) return;
+  const input = document.getElementById('clear-data-confirm-input');
+  if ((input?.value || '').trim().toUpperCase() !== 'DELETE') {
+    toast('Type DELETE exactly to confirm.', 'error');
+    return;
+  }
+  const btn = document.getElementById('clear-data-confirm-btn');
+  const originalLabel = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Deleting...';
+  try {
+    await cfg.apiCall();
+    closeModal('clear-data-modal');
+    toast(cfg.successMsg, 'success');
+    cfg.refresh();
+  } catch (err) {
+    toast(err.message || 'Failed to clear data', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalLabel;
+  }
+}
+
+async function handleLogoUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  if (file.size > 500000) { toast('Logo too large. Max 500KB.', 'error'); return; }
+  try {
+    const updated = await SettingsAPI.updateCompanyLogo(file);
+    _companySettingsCache = updated;
+    const prev = document.getElementById('set-logo-preview');
+    if (prev) prev.innerHTML = `<img src="${updated.logo}" style="width:100%;height:100%;object-fit:contain;border-radius:6px">`;
+    if (typeof updatePreview === 'function') updatePreview();
+    toast('Logo uploaded!', 'success');
+  } catch (err) {
+    toast(err.message || 'Failed to upload logo', 'error');
+  }
+}
+
+function updatePreview() {
+  const g = id => document.getElementById(id)?.value||'';
+  const el = (id,v) => { const e=document.getElementById(id); if(e) e.textContent=v; };
+  const name = g('set-storename')||DB.sysSettings.storeName;
+  const logoArea = document.getElementById('prev-logo-area');
+  if (logoArea) {
+    if (DB.sysSettings.logoDataUrl) {
+      logoArea.innerHTML = `<img src="${DB.sysSettings.logoDataUrl}" style="height:40px;object-fit:contain"><div style="font-size:14px;font-weight:800">${name}</div>`;
+    } else {
+      logoArea.textContent = '🏪 ' + name;
+    }
+  }
+  el('prev-address', g('set-address')||DB.sysSettings.address);
+  el('prev-phone', g('set-phone')||DB.sysSettings.phone);
+  el('prev-header', g('set-receipt-header')||DB.sysSettings.receiptHeader);
+  const distName = g('set-dist-name')||DB.sysSettings.distributorName;
+  const distPhone = g('set-dist-phone')||DB.sysSettings.distributorContact;
+  const ntn = g('set-ntn')||DB.sysSettings.ntn||'';
+  el('prev-dist-name', distName);
+  el('prev-dist-phone', distPhone);
+  el('prev-ntn', ntn ? 'NTN: '+ntn : '');
+}
+
+// Get store header HTML for invoices
+function getInvoiceHeaderHtml(docTitle, refNo, refDate, opts = {}) {
+  const { showLogo = true, showAddress = true } = opts;
+  const real = _companySettingsCache;
+  const s = real ? {
+    storeName: real.company_name, address: real.address, phone: real.phone, email: real.email,
+    logoDataUrl: real.logo,
+    distributorName: real.distributor_name || '',
+    distributorContact: [real.distributor_phone, real.distributor_email].filter(Boolean).join(' · '),
+    ntn: real.tax_id || '',
+  } : DB.sysSettings;
+  const logoHtml = showLogo
+    ? (s.logoDataUrl
+        ? `<img src="${s.logoDataUrl}" style="height:50px;object-fit:contain;margin-bottom:4px">`
+        : `<span style="font-size:24px">🏪</span>`)
+    : '';
+  return `<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #000;padding-bottom:8mm;margin-bottom:6mm">
+    <div>
+      ${logoHtml}
+      <div style="font-size:18px;font-weight:800;color:#000">${s.storeName}</div>
+      ${showAddress ? `<div style="font-size:11px;color:#555">${s.address}</div>
+      <div style="font-size:11px;color:#555">Tel: ${s.phone} | ${s.email}</div>` : ''}
+      ${s.distributorName?`<div style="font-size:11px;color:#333;margin-top:3px;font-weight:600">Distribution: ${s.distributorName}</div>`:''}
+      ${s.distributorContact?`<div style="font-size:10px;color:#555">${s.distributorContact}</div>`:''}
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:20px;font-weight:800;color:#000">${docTitle}</div>
+      <div style="font-size:12px;margin-top:4px">No: <strong>${refNo}</strong></div>
+      <div style="font-size:11px;color:#555">Date: ${refDate}</div>
+      ${s.ntn?`<div style="font-size:10px;color:#555;margin-top:3px">NTN: ${s.ntn}</div>`:''}
+    </div>
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════
+// LEDGER ACCOUNTS
+// ═══════════════════════════════════════════════════════
+let _ledgerAccountCache = [];
+
+async function renderLedger() {
+  await filterLedgerAccounts();
+  await renderAllAccountsSummary();
+}
+
+async function filterLedgerAccounts() {
+  const type = document.getElementById('ldg-type')?.value||'customer';
+  const q = (document.getElementById('ldg-search')?.value||'').toLowerCase();
+  const sel = document.getElementById('ldg-account-select');
+  if (!sel) return;
+  // page_size:2000 — was 500, so any customer/supplier past the first 500
+  // never showed up no matter what you typed in the search box (the box only
+  // filters this locally-cached list, it doesn't re-query the server).
+  const data = type==='customer' ? await CustomersAPI.list({ page_size: 2000 }) : await SuppliersAPI.list({ page_size: 2000 });
+  _ledgerAccountCache = data.results || data;
+  if (type === 'customer') {
+    // Replace the drifting cached counter with the real balance so the
+    // "All Customer Accounts" list and the payment lock below are correct.
+    try {
+      const bal = await CustomersAPI.balances();
+      const map = bal.balances || bal || {};
+      _ledgerAccountCache.forEach(x => {
+        x.outstanding_balance = map[x.id] ? Math.max(0, Number(map[x.id].remaining) || 0) : 0;
+      });
+    } catch (_) { /* keep the cached figure if the request fails */ }
+  }
+  const filtered = _ledgerAccountCache.filter(x=>x.name.toLowerCase().includes(q));
+  sel.innerHTML = '<option value="">— Select Account —</option>' +
+    filtered.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');
+}
+
+async function loadLedgerAccount() {
+  const type = document.getElementById('ldg-type')?.value||'customer';
+  const id = parseInt(document.getElementById('ldg-account-select')?.value)||0;
+  if (!id) {
+    document.getElementById('ldg-account-summary').style.display='none';
+    document.getElementById('ldg-table-card').style.display='none';
+    document.getElementById('ldg-daily-card').style.display='none';
+    document.getElementById('ldg-all-accounts').style.display='';
+    _ldgAdvance = 0; const cab = document.getElementById('ldg-clear-advance-btn'); if (cab) cab.style.display = 'none';
+    return;
+  }
+  const entity = _ledgerAccountCache.find(x=>x.id===id);
+  if (!entity) return;
+  if (type !== 'customer') { _ldgAdvance = 0; const b = document.getElementById('ldg-clear-advance-btn'); if (b) b.style.display = 'none'; }
+
+  const ledger = type==='customer' ? await CustomersAPI.ledger(id) : await SuppliersAPI.ledger(id);
+  let entries = ledger.entries;
+
+  const from = document.getElementById('ldg-from')?.value||'';
+  const to   = document.getElementById('ldg-to')?.value||'';
+  if (from) entries = entries.filter(e=>e.date.slice(0,10)>=from);
+  if (to)   entries = entries.filter(e=>e.date.slice(0,10)<=to);
+
+  document.getElementById('ldg-account-summary').style.display='';
+  document.getElementById('ldg-table-card').style.display='';
+  document.getElementById('ldg-all-accounts').style.display='none';
+  document.getElementById('ldg-acc-name').textContent = entity.name;
+  document.getElementById('ldg-acc-no').textContent = type==='customer'?'Customer':'Supplier';
+  document.getElementById('ldg-table-title').textContent = `Ledger: ${entity.name}`;
+
+  if (type === 'customer') {
+    // Payment-receipt view: no invoice/return line items, no debit/credit
+    // flip-flopping — just what's owed, what's been paid, and a dated row
+    // for each payment with the balance remaining right after it.
+    const amountOwed = Number(ledger.amount_owed || 0);
+    const totalPaid  = Number(ledger.total_paid || 0);
+    const remaining  = Number(ledger.remaining || 0);
+
+    document.getElementById('ldg-total-debit-label').textContent  = 'Total Billed';
+    document.getElementById('ldg-total-credit-label').textContent = 'Total Paid';
+    document.getElementById('ldg-net-balance-label').textContent  = remaining>0 ? 'Remaining Due' : 'Advance / Credit';
+    document.getElementById('ldg-total-debit').textContent  = 'Rs.'+amountOwed.toFixed(2);
+    document.getElementById('ldg-total-credit').textContent = 'Rs.'+totalPaid.toFixed(2);
+    document.getElementById('ldg-net-balance').textContent  = 'Rs.'+Math.abs(remaining).toFixed(2);
+    document.getElementById('ldg-net-balance').className = 'stat-value '+(remaining>0?'text-red':'text-green');
+    _ldgAdvance = remaining < 0 ? Math.round(-remaining*100)/100 : 0;
+    const caBtn = document.getElementById('ldg-clear-advance-btn');
+    if (caBtn) { caBtn.style.display = ''; caBtn.style.opacity = _ldgAdvance > 0 ? '1' : '.55'; }
+
+    document.getElementById('ldg-thead-row').innerHTML =
+      '<th>Date</th><th>Description</th><th>Reference</th><th>Amount</th><th>Balance</th><th>Actions</th>';
+
+    document.getElementById('ldg-tbody').innerHTML = entries.length
+      ? entries.map(r=>{
+          const isInvoice = r.type === 'invoice' || r.type === 'advance_cleared';
+          const amtSign = isInvoice ? '+' : '-';
+          const amtClass = r.type === 'advance_cleared' ? 'text-yellow' : (isInvoice ? 'text-red' : 'text-green');
+          const editBtn = r.type === 'advance_cleared'
+            ? `<button class="btn btn-ghost btn-xs" title="Undo this advance clearance" onclick="undoClearAdvance(${id}, ${r.id})"><i class="fa fa-rotate-left"></i></button>`
+            : r.type === 'payment'
+            ? `<button class="btn btn-ghost btn-xs" title="Edit this payment" onclick="openPaymentEditModal(${JSON.stringify(r).replace(/'/g,"&#39;").replace(/"/g,'&quot;')})"><i class="fa fa-pen"></i></button>`
+            : '';
+          return `
+          <tr>
+            <td style="font-size:12px">${r.date.slice(0,10)}</td>
+            <td>${r.description}</td>
+            <td class="td-mono" style="font-size:11px">${r.reference||'—'}</td>
+            <td class="${amtClass} fw-700">${amtSign}Rs.${Number(r.amount).toFixed(2)}</td>
+            <td class="fw-700 ${Number(r.remaining)>0?'text-red':'text-green'}">Rs.${Number(r.remaining).toFixed(2)}</td>
+            <td>${editBtn}</td>
+          </tr>`;
+        }).join('')
+      : `<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted)">No invoices or payments yet</td></tr>`;
+
+    renderDailyRecap(entries, {
+      balanceKey: 'remaining', openingBalance: 0,
+      receivedLabel: 'Net Movement That Day',
+    });
+    return;
+  }
+
+  // Supplier view — unchanged: debit/credit/balance statement.
+  const totalDebit = entries.reduce((s,e)=>s+Number(e.debit),0);
+  const totalCredit = entries.reduce((s,e)=>s+Number(e.credit),0);
+
+  document.getElementById('ldg-total-debit-label').textContent  = 'Total Debit (Receivable)';
+  document.getElementById('ldg-total-credit-label').textContent = 'Total Credit (Paid)';
+  document.getElementById('ldg-net-balance-label').textContent  = 'Net Balance';
+  document.getElementById('ldg-total-debit').textContent  = 'Rs.'+totalDebit.toFixed(2);
+  document.getElementById('ldg-total-credit').textContent = 'Rs.'+totalCredit.toFixed(2);
+  const net = totalDebit - totalCredit;
+  document.getElementById('ldg-net-balance').textContent = 'Rs.'+Math.abs(net).toFixed(2);
+  document.getElementById('ldg-net-balance').className = 'stat-value '+(net>0?'text-red':'text-green');
+
+  document.getElementById('ldg-thead-row').innerHTML =
+    '<th>Date</th><th>Description</th><th>Reference</th><th>Debit</th><th>Credit</th><th>Balance</th>';
+
+  document.getElementById('ldg-tbody').innerHTML = entries.length
+    ? entries.map(r=>`
+        <tr>
+          <td style="font-size:12px">${r.date.slice(0,10)}</td>
+          <td>${r.description}</td>
+          <td class="td-mono" style="font-size:11px">${r.reference||'—'}</td>
+          <td class="text-red fw-700">${Number(r.debit)>0?'Rs.'+Number(r.debit).toFixed(2):'—'}</td>
+          <td class="text-green fw-700">${Number(r.credit)>0?'Rs.'+Number(r.credit).toFixed(2):'—'}</td>
+          <td class="fw-700 ${Number(r.balance)>0?'text-red':'text-green'}">Rs.${Math.abs(Number(r.balance)).toFixed(2)} ${Number(r.balance)>0?'Dr':'Cr'}</td>
+        </tr>`).join('')
+    : `<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted)">No transactions found</td></tr>`;
+
+  renderDailyRecap(entries, {
+    receivedKey: null, balanceKey: 'balance', openingBalance: 0,
+    receivedLabel: 'Net Movement That Day', netCreditKey: 'credit', netDebitKey: 'debit',
+  });
+}
+
+// Groups ledger entries by calendar day and shows, per day: the balance
+// carried in from the previous day, how much moved that day, and the
+// balance carried out — so "kitna lena tha, kitna aya, ab kitna lena hai"
+// is readable date-wise at a glance instead of buried in every row.
+// Groups ledger entries by calendar day into { date, opening, received, closing }
+// rows — shared by the on-screen Day-wise Recap card and the printed A4
+// statement, so "kitna lena tha, kitna aya, ab kitna lena hai" reads the
+// same date-wise in both places.
+const LDG_DAILY_RECAP_KEY = 'smartretail_ldg_daily_recap_visible';
+// Whether the Day-wise Recap section shows on-screen AND on the printed
+// ledger statement — persisted so the choice sticks across visits, per
+// the user's own request: default ON, but they can switch it off and it
+// stays off until they turn it back on themselves.
+let _ldgDailyRecapVisible = (() => {
+  const saved = localStorage.getItem(LDG_DAILY_RECAP_KEY);
+  return saved === null ? true : saved === 'true';
+})();
+
+function _applyDailyRecapToggleUI() {
+  const cb   = document.getElementById('ldg-daily-recap-toggle');
+  const bg   = document.querySelector('#ldg-daily-card .drc-toggle-bg');
+  const dot  = document.querySelector('#ldg-daily-card .drc-toggle-dot');
+  const wrap = document.getElementById('ldg-daily-body-wrap');
+  if (cb) cb.checked = _ldgDailyRecapVisible;
+  if (bg) bg.style.background = _ldgDailyRecapVisible ? 'var(--accent)' : 'var(--border)';
+  if (dot) dot.style.left = _ldgDailyRecapVisible ? '18px' : '2px';
+  if (wrap) wrap.style.display = _ldgDailyRecapVisible ? '' : 'none';
+}
+
+function toggleDailyRecapVisible() {
+  _ldgDailyRecapVisible = !_ldgDailyRecapVisible;
+  localStorage.setItem(LDG_DAILY_RECAP_KEY, String(_ldgDailyRecapVisible));
+  _applyDailyRecapToggleUI();
+}
+
+function buildDailyRecapRows(entries, opts) {
+  if (!entries.length) return [];
+  const byDate = {};
+  const order = [];
+  entries.forEach(e => {
+    const d = e.date.slice(0, 10);
+    if (!byDate[d]) { byDate[d] = { lastBalance: null }; order.push(d); }
+    byDate[d].lastBalance = Number(e[opts.balanceKey]);
+  });
+
+  // Derived purely from how the running balance moved that day (opening
+  // minus closing), not by re-summing each entry's own amount — that way
+  // it's correct regardless of whether the day's entries were invoices
+  // (push balance up), payments/returns (bring it down), or a mix of both.
+  let opening = opts.openingBalance;
+  return order.map(d => {
+    const closing = byDate[d].lastBalance;
+    const received = opening - closing;
+    const row = { date: d, opening, received, closing };
+    opening = closing;
+    return row;
+  });
+}
+
+function renderDailyRecap(entries, opts) {
+  const card = document.getElementById('ldg-daily-card');
+  if (!entries.length) { card.style.display = 'none'; return; }
+  const rows = buildDailyRecapRows(entries, opts);
+  const th = document.getElementById('ldg-daily-received-th');
+  if (th && opts.receivedLabel) th.textContent = opts.receivedLabel;
+  card.style.display = '';
+  _applyDailyRecapToggleUI();
+  document.getElementById('ldg-daily-tbody').innerHTML = rows.map(r => `
+    <tr>
+      <td style="font-size:12px">${r.date}</td>
+      <td>Rs.${Math.abs(r.opening).toFixed(2)}</td>
+      <td class="${r.received>=0?'text-green':'text-red'} fw-700">${r.received>=0?'+':''}Rs.${r.received.toFixed(2)}</td>
+      <td class="fw-700 ${r.closing>0?'text-red':'text-green'}">Rs.${Math.abs(r.closing).toFixed(2)}</td>
+    </tr>`).join('');
+}
+
+async function renderAllAccountsSummary() {
+  const type = document.getElementById('ldg-type')?.value||'customer';
+  const items = _ledgerAccountCache.length ? _ledgerAccountCache
+    : (type==='customer' ? (await CustomersAPI.list({page_size:2000})).results : (await SuppliersAPI.list({page_size:2000})).results);
+  document.getElementById('ldg-all-title').textContent = type==='customer' ? 'All Customer Accounts' : 'All Supplier Accounts';
+  document.getElementById('ldg-all-tbody').innerHTML = items.map(x=>{
+    const balance = type==='customer' ? Number(x.outstanding_balance) : Number(x.outstanding_payable);
+    return `<tr>
+      <td><span class="badge badge-purple" style="font-family:var(--mono)">${accNo(x.id, x.account_no)}</span></td>
+      <td class="fw-700">${x.name}</td>
+      <td>${x.phone||'—'}</td>
+      <td class="text-red fw-700">Rs.${balance>0?balance.toFixed(2):'0.00'}</td>
+      <td class="text-green fw-700">—</td>
+      <td class="fw-700 ${balance>0?'text-red':'text-green'}">Rs.${Math.abs(balance).toFixed(2)} ${balance>0?'Dr':'Cr'}</td>
+      <td>
+        <button class="btn btn-ghost btn-xs" onclick="document.getElementById('ldg-account-select').value=${x.id};loadLedgerAccount()"><i class="fa fa-eye"></i></button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// Manual full ledger entries (arbitrary debit/credit rows) still aren't
+// supported — but a real "Collect Payment" IS: a general cash collection
+// against a customer's running balance for daily credit-collection rounds,
+// not tied to any specific invoice. See collect_customer_payment (backend).
+let _leDue = 0;   // what the customer still owes — the most a payment here may be
+async function openLedgerEntryModal() {
+  const type = document.getElementById('ldg-type')?.value || 'customer';
+  const id = parseInt(document.getElementById('ldg-account-select')?.value) || 0;
+  if (type !== 'customer') {
+    toast('Manual collection entries are only for customer accounts — supplier ledgers are generated automatically from purchases and payments.', 'warning');
+    return;
+  }
+  if (!id) { toast('Please select a customer account first', 'warning'); return; }
+  const entity = _ledgerAccountCache.find(x => x.id === id);
+  // Account lock: a customer with no balance can't be given a manual
+  // advance/credit payment — payments only open up again once a new bill exists.
+  // Checked against the live ledger, not the cached counter.
+  let due = Number(entity?.outstanding_balance || 0);
+  try { due = Number((await CustomersAPI.ledger(id)).remaining) || 0; } catch (_) {}
+  due = Math.round(due * 100) / 100;
+  if (due <= 0) {
+    showNoPaymentRemaining(entity?.name);
+    return;
+  }
+  _leDue = due;
+  document.getElementById('le-cust-name').textContent = entity ? entity.name + "'s" : "the customer's";
+  document.getElementById('le-date').value = new Date().toISOString().slice(0, 10);
+  document.getElementById('le-amount').value = '';
+  document.getElementById('le-amount').max = due.toFixed(2);
+  const dueEl = document.getElementById('le-due-hint');
+  if (dueEl) dueEl.textContent = 'Remaining to collect: Rs.' + due.toFixed(2) + ' — you can receive any amount up to this.';
+  document.getElementById('le-method').value = 'cash';
+  document.getElementById('le-ref').value = '';
+  openModal('ledger-entry-modal');
+}
+function openLedgerEntryModalFor(id) { openLedgerEntryModal(); }
+
+// ── General Auth prompt: resolves with the verified password, or null if cancelled ──
+let _generalAuthResolve = null;
+function askGeneralAuth() {
+  return new Promise(resolve => {
+    _generalAuthResolve = resolve;
+    const inp = document.getElementById('general-auth-input');
+    const err = document.getElementById('general-auth-error');
+    inp.value = ''; err.style.display = 'none';
+    openModal('general-auth-modal');
+    setTimeout(() => inp.focus(), 50);
+  });
+}
+function _generalAuthFinish(value) {
+  closeModal('general-auth-modal');
+  const r = _generalAuthResolve; _generalAuthResolve = null;
+  if (r) r(value);
+}
+async function _generalAuthSubmit() {
+  const inp = document.getElementById('general-auth-input');
+  const err = document.getElementById('general-auth-error');
+  const btn = document.getElementById('general-auth-ok');
+  const pw = inp.value;
+  if (!pw) { err.textContent = 'Please enter the password'; err.style.display = 'block'; return; }
+  btn.disabled = true;
+  try {
+    const res = await SettingsAPI.verifyGeneralAuth(pw);
+    if (res && res.valid) { _generalAuthFinish(pw); return; }
+    err.textContent = 'Incorrect password. Please try again.';
+    err.style.display = 'block'; inp.value = ''; inp.focus();
+  } catch (e) {
+    err.textContent = e.status === 429 ? 'Too many attempts. Please wait a minute.' : (e.message || 'Could not verify password');
+    err.style.display = 'block';
+  } finally { btn.disabled = false; }
+}
+
+let _leSaving = false;   // blocks a double-submit while the payment is being saved
+async function saveLedgerEntry() {
+  const custId = parseInt(document.getElementById('ldg-account-select')?.value) || 0;
+  if (!custId) return;
+  const amount = parseFloat(document.getElementById('le-amount').value);
+  const date = document.getElementById('le-date').value;
+  if (!date) { toast('Please pick a date', 'warning'); return; }
+  if (!amount || amount <= 0) { toast('Amount must be greater than 0', 'warning'); return; }
+  if (_leDue > 0 && amount > _leDue + 0.001) {
+    toast('Only Rs.' + _leDue.toFixed(2) + ' is remaining — payment can\'t be more than the balance.', 'warning');
+    return;
+  }
+
+  // General Auth: if a password is set in Settings, it must be entered BEFORE
+  // the payment goes through (the server re-checks it as well).
+  let authPassword = '';
+  try {
+    const cs = await SettingsAPI.getCompany();
+    _companySettingsCache = cs;
+    if (cs && cs.general_auth_enabled) {
+      authPassword = await askGeneralAuth();
+      if (authPassword === null) return;   // cancelled — nothing is recorded
+    }
+  } catch (_) { /* settings unreadable — the server still enforces the password */ }
+
+  // Password accepted (or none needed) → close the payment box RIGHT AWAY so
+  // the screen doesn't wait on the network; it is reopened only if saving fails.
+  if (_leSaving) return;
+  _leSaving = true;
+  closeModal('ledger-entry-modal');
+
+  try {
+    _slipsLoaded = false;   // Sale Slips list must reload (live Previous Balance)
+    const body = {
+      amount: amount.toFixed(2),
+      method: document.getElementById('le-method').value,
+      reference: document.getElementById('le-ref').value || '',
+      date: date + 'T12:00:00',
+    };
+    if (authPassword) body.auth_password = authPassword;
+    await CustomersAPI.collectPayment(custId, body);
+    toast('Payment collected and added to ledger', 'success');
+    await loadLedgerAccount();   // updated ledger shown immediately after the save
+  } catch (err) {
+    if (/no payment remaining|already clear/i.test(err.message || '')) { showNoPaymentRemaining(); }
+    else {
+      openModal('ledger-entry-modal');   // keep what was typed so it can be retried
+      toast(err.message || 'Could not collect payment', 'error');
+    }
+  } finally {
+    _leSaving = false;
+  }
+}
+
+// ── Clear Advance / Credit — clears ONLY the advance, not the whole ledger ──
+let _ldgAdvance = 0;
+function openClearAdvanceModal() {
+  const id = parseInt(document.getElementById('ldg-account-select')?.value) || 0;
+  if (!id || _ldgAdvance <= 0) { toast('Ther is No Advance Balance of that Customer )', 'warning'); return; }
+  const entity = _ledgerAccountCache.find(x => x.id === id);
+  document.getElementById('ca-cust-name').textContent = entity ? entity.name : 'the customer';
+  document.getElementById('ca-advance-hint').textContent = 'Advance available: Rs.' + _ldgAdvance.toFixed(2);
+  document.getElementById('ca-date').value = new Date().toISOString().slice(0, 10);
+  const amt = document.getElementById('ca-amount');
+  amt.value = _ldgAdvance.toFixed(2); amt.max = _ldgAdvance.toFixed(2);
+  document.getElementById('ca-method').value = 'cash';
+  document.getElementById('ca-note').value = '';
+  openModal('clear-advance-modal');
+}
+
+let _caSaving = false;
+async function saveClearAdvance() {
+  const custId = parseInt(document.getElementById('ldg-account-select')?.value) || 0;
+  if (!custId || _caSaving) return;
+  const amount = parseFloat(document.getElementById('ca-amount').value);
+  const date = document.getElementById('ca-date').value;
+  if (!date) { toast('Please pick a date', 'warning'); return; }
+  if (!amount || amount <= 0) { toast('Amount must be greater than 0', 'warning'); return; }
+  if (amount > _ldgAdvance + 0.001) { toast('Only Rs.' + _ldgAdvance.toFixed(2) + ' advance is available', 'warning'); return; }
+
+  let authPassword = '';
+  try {
+    const cs = await SettingsAPI.getCompany();
+    _companySettingsCache = cs;
+    if (cs && cs.general_auth_enabled) {
+      authPassword = await askGeneralAuth();
+      if (authPassword === null) return;
+    }
+  } catch (_) {}
+
+  _caSaving = true;
+  try {
+    const body = {
+      amount: amount.toFixed(2),
+      method: document.getElementById('ca-method').value,
+      note: document.getElementById('ca-note').value || '',
+      date: date + 'T12:00:00',
+    };
+    if (authPassword) body.auth_password = authPassword;
+    await CustomersAPI.clearAdvance(custId, body);
+    closeModal('clear-advance-modal');
+    _slipsLoaded = false;
+    toast('Advance cleared — rest of the ledger is unchanged', 'success');
+    await loadLedgerAccount();
+  } catch (err) {
+    toast(err.message || 'Could not clear advance', 'error');
+  } finally { _caSaving = false; }
+}
+
+async function undoClearAdvance(custId, clearanceId) {
+  if (!(await confirmModal('This advance clearance will be removed and the advance will show on the ledger again.', { title: 'Undo Advance Clearance?', confirmText: 'Undo' }))) return;
+  try {
+    await CustomersAPI.undoClearAdvance(custId, clearanceId);
+    _slipsLoaded = false;
+    toast('Advance clearance undone', 'success');
+    await loadLedgerAccount();
+  } catch (err) { toast(err.message || 'Could not undo', 'error'); }
+}
+
+// ── Edit / delete a real payment, straight from its ledger row ──────────
+function openPaymentEditModal(entry) {
+  document.getElementById('pe-payment-id').value = entry.id;
+  document.getElementById('pe-ref-label').textContent = entry.reference || entry.description || ('Payment #' + entry.id);
+  document.getElementById('pe-date').value = entry.date.slice(0, 10);
+  document.getElementById('pe-amount').value = Number(entry.amount).toFixed(2);
+  document.getElementById('pe-method').value = entry.method || 'cash';
+  document.getElementById('pe-reference').value = entry.reference || '';
+  openModal('payment-edit-modal');
+}
+
+async function savePaymentEdit() {
+  const id = parseInt(document.getElementById('pe-payment-id').value) || 0;
+  if (!id) return;
+  const amount = parseFloat(document.getElementById('pe-amount').value);
+  const date = document.getElementById('pe-date').value;
+  if (!date) { toast('Please pick a date', 'warning'); return; }
+  if (!amount || amount <= 0) { toast('Amount must be greater than 0', 'warning'); return; }
+
+  try {
+    await SalesAPI.updatePayment(id, {
+      amount: amount.toFixed(2),
+      method: document.getElementById('pe-method').value,
+      reference: document.getElementById('pe-reference').value || '',
+      // Keep the original time-of-day, just move the calendar date — avoids
+      // every edited payment collapsing to midnight and reshuffling order
+      // among same-day entries.
+      date: date + 'T12:00:00',
+    });
+    closeModal('payment-edit-modal');
+    toast('Payment updated', 'success');
+    await loadLedgerAccount();
+  } catch (err) {
+    toast(err.message || 'Could not update payment', 'error');
+  }
+}
+
+async function deletePaymentEntry() {
+  const id = parseInt(document.getElementById('pe-payment-id').value) || 0;
+  if (!id) return;
+  if (!(await confirmModal('This payment record will be permanently removed and the customer\'s remaining balance will go back up by this amount.', { title: 'Delete Payment?', confirmText: 'Delete Payment' }))) return;
+  try {
+    await SalesAPI.deletePayment(id);
+    closeModal('payment-edit-modal');
+    toast('Payment deleted', 'success');
+    await loadLedgerAccount();
+  } catch (err) {
+    toast(err.message || 'Could not delete payment', 'error');
+  }
+}
+
+async function printLedgerA4() {
+  const type = document.getElementById('ldg-type')?.value||'customer';
+  const id = parseInt(document.getElementById('ldg-account-select')?.value)||0;
+  if (!id) { toast('Please select an account first','warning'); return; }
+  const entity = _ledgerAccountCache.find(x=>x.id===id);
+  if (!entity) return;
+  const ledger = type==='customer' ? await CustomersAPI.ledger(id) : await SuppliersAPI.ledger(id);
+
+  const dailyRows = type === 'customer'
+    ? buildDailyRecapRows(ledger.entries, { balanceKey: 'remaining', openingBalance: 0 })
+    : buildDailyRecapRows(ledger.entries, { balanceKey: 'balance', openingBalance: 0 });
+
+  const dailyHtml = (_ldgDailyRecapVisible && dailyRows.length) ? `
+    <div style="margin-bottom:5mm;font-size:12px;font-weight:700">Day-wise Recap</div>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:6mm">
+      <thead><tr>
+        <th style="padding:6px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:10px;text-align:left">Date</th>
+        <th style="padding:6px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:10px;text-align:right">Opening Balance</th>
+        <th style="padding:6px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:10px;text-align:right">Received That Day</th>
+        <th style="padding:6px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:10px;text-align:right">Closing Balance</th>
+      </tr></thead>
+      <tbody style="font-size:10px">
+        ${dailyRows.map(r=>`<tr>
+          <td style="padding:5px 8px">${r.date}</td>
+          <td style="padding:5px 8px;text-align:right">Rs.${Math.abs(r.opening).toFixed(2)}</td>
+          <td style="padding:5px 8px;text-align:right;color:${r.received>=0?'#16a34a':'#dc2626'}">${r.received>=0?'+':''}Rs.${r.received.toFixed(2)}</td>
+          <td style="padding:5px 8px;text-align:right;font-weight:700;color:${r.closing>0?'#dc2626':'#16a34a'}">Rs.${Math.abs(r.closing).toFixed(2)}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>` : '';
+
+  let mainTableHtml, totalsHtml;
+  if (type === 'customer') {
+    const amountOwed = Number(ledger.amount_owed||0), totalPaid = Number(ledger.total_paid||0), remaining = Number(ledger.remaining||0);
+    const rows = ledger.entries.map(e=>{
+      const isInvoice = e.type === 'invoice' || e.type === 'advance_cleared';
+      return `<tr>
+      <td>${e.date.slice(0,10)}</td><td>${e.description}</td><td style="font-family:monospace">${e.reference||'—'}</td>
+      <td style="text-align:right;color:${isInvoice?'#dc2626':'#16a34a'};font-weight:700">${isInvoice?'+':'-'}Rs.${Number(e.amount).toFixed(2)}</td>
+      <td style="text-align:right;font-weight:700;color:${Number(e.remaining)>0?'#dc2626':'#16a34a'}">Rs.${Number(e.remaining).toFixed(2)}</td>
+    </tr>`;
+    }).join('');
+    mainTableHtml = `<table style="width:100%;border-collapse:collapse;margin-bottom:5mm">
+      <thead><tr>
+        <th style="padding:7px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:11px;text-align:left">Date</th>
+        <th style="padding:7px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:11px;text-align:left">Description</th>
+        <th style="padding:7px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:11px;text-align:left">Reference</th>
+        <th style="padding:7px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:11px;text-align:right">Amount</th>
+        <th style="padding:7px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:11px;text-align:right">Balance</th>
+      </tr></thead>
+      <tbody style="font-size:11px">${rows || `<tr><td colspan="5" style="text-align:center;padding:14px;color:#999">No invoices or payments yet</td></tr>`}</tbody>
+      <tfoot>
+        <tr style="background:#f3f4f6;font-weight:700;font-size:12px">
+          <td colspan="3" style="padding:7px 8px">TOTALS — Billed Rs.${amountOwed.toFixed(2)} / Paid Rs.${totalPaid.toFixed(2)}</td>
+          <td></td>
+          <td style="padding:7px 8px;text-align:right;color:${remaining>0?'#dc2626':'#16a34a'}">Rs.${Math.abs(remaining).toFixed(2)}</td>
+        </tr>
+      </tfoot>
+    </table>`;
+    totalsHtml = `<div style="margin-bottom:5mm;font-size:12px">
+      <strong>Total Billed:</strong> Rs.${amountOwed.toFixed(2)} &nbsp;|&nbsp;
+      <strong>Total Paid:</strong> Rs.${totalPaid.toFixed(2)} &nbsp;|&nbsp;
+      <strong>${remaining>0?'Remaining Due':'Advance / Credit'}:</strong> Rs.${Math.abs(remaining).toFixed(2)}
+    </div>`;
+  } else {
+    let totalD=0, totalC=0;
+    const rows = ledger.entries.map(e=>{
+      totalD+=Number(e.debit); totalC+=Number(e.credit);
+      const bal = Number(e.balance);
+      return `<tr>
+        <td>${e.date.slice(0,10)}</td><td>${e.description}</td><td style="font-family:monospace">${e.reference||'—'}</td>
+        <td style="text-align:right;color:#dc2626">${Number(e.debit)>0?'Rs.'+Number(e.debit).toFixed(2):'—'}</td>
+        <td style="text-align:right;color:#16a34a">${Number(e.credit)>0?'Rs.'+Number(e.credit).toFixed(2):'—'}</td>
+        <td style="text-align:right;font-weight:700;color:${bal>0?'#dc2626':'#16a34a'}">Rs.${Math.abs(bal).toFixed(2)} ${bal>0?'Dr':'Cr'}</td>
+      </tr>`;
+    }).join('');
+    mainTableHtml = `<table style="width:100%;border-collapse:collapse;margin-bottom:5mm">
+      <thead><tr>
+        <th style="padding:7px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:11px;text-align:left">Date</th>
+        <th style="padding:7px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:11px;text-align:left">Description</th>
+        <th style="padding:7px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:11px;text-align:left">Reference</th>
+        <th style="padding:7px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:11px;text-align:right">Debit</th>
+        <th style="padding:7px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:11px;text-align:right">Credit</th>
+        <th style="padding:7px 8px;background:#d9d9d9 !important;color:#000 !important;font-size:11px;text-align:right">Balance</th>
+      </tr></thead>
+      <tbody style="font-size:11px">${rows || `<tr><td colspan="6" style="text-align:center;padding:14px;color:#999">No transactions found</td></tr>`}</tbody>
+      <tfoot>
+        <tr style="background:#f3f4f6;font-weight:700;font-size:12px">
+          <td colspan="3" style="padding:7px 8px">TOTALS</td>
+          <td style="padding:7px 8px;text-align:right;color:#dc2626">Rs.${totalD.toFixed(2)}</td>
+          <td style="padding:7px 8px;text-align:right;color:#16a34a">Rs.${totalC.toFixed(2)}</td>
+          <td style="padding:7px 8px;text-align:right;color:${(totalD-totalC)>0?'#dc2626':'#16a34a'}">Rs.${Math.abs(totalD-totalC).toFixed(2)} ${(totalD-totalC)>0?'Dr':'Cr'}</td>
+        </tr>
+      </tfoot>
+    </table>`;
+    totalsHtml = '';
+  }
+
+  const html = `<div class="a4-doc">
+    ${getInvoiceHeaderHtml('ACCOUNT STATEMENT', entity.accountNo||String(id), new Date().toLocaleDateString())}
+    <div style="margin-bottom:5mm;font-size:12px">
+      <strong>Account:</strong> ${entity.name} &nbsp;|&nbsp;
+      <strong>Type:</strong> ${type==='customer'?'Customer':'Supplier'} &nbsp;|&nbsp;
+      <strong>Phone:</strong> ${entity.phone||'—'}
+    </div>
+    ${totalsHtml}
+    ${mainTableHtml}
+    ${dailyHtml}
+    <div style="margin-top:8mm;display:grid;grid-template-columns:1fr 1fr;gap:20px;font-size:11px">
+      <div style="border-top:1px solid #000;padding-top:5px;text-align:center;color:#555">Authorized Signature</div>
+      <div style="border-top:1px solid #000;padding-top:5px;text-align:center;color:#555">Customer Signature</div>
+    </div>
+    <div style="margin-top:6mm;display:flex;justify-content:space-between;font-size:10px;color:#999;border-top:1px solid #eee;padding-top:3mm">
+      <span>SmartRetail ERP — Account Statement</span>
+      <span>Printed: ${new Date().toLocaleString()}</span>
+    </div>
+  </div>`;
+  const pa = document.getElementById('print-area');
+  pa.innerHTML = html; pa.style.display='block';
+  window.print();
+  setTimeout(()=>{ pa.style.display='none'; },1200);
+}
+
+// ═══════════════════════════════════════════════════════
+// BALANCE SHEET
+// ═══════════════════════════════════════════════════════
+async function renderBalanceSheet() {
+  const [pl, cf, custData, supData] = await Promise.all([
+    FinanceAPI.profitLoss(), FinanceAPI.cashFlow(),
+    CustomersAPI.list({ page_size: 500 }), SuppliersAPI.list({ page_size: 500 }),
+  ]);
+  const salesIncome = Number(pl.income);
+  const totalExpenses = Number(pl.expenses);
+  const purchaseCost = Number(pl.cost_of_goods_sold);
+  const grossProfit = Number(pl.gross_profit);
+  const netProfit = Number(pl.net_profit);
+
+  const custReceivables = (custData.results||custData)
+    .filter(c=>Number(c.outstanding_balance)>0)
+    .map(c=>({ name:c.name, acc:accNo(c.id, c.account_no), bal:Number(c.outstanding_balance) }));
+  const totalReceivable = custReceivables.reduce((s,x)=>s+x.bal,0);
+
+  const supPayables = (supData.results||supData)
+    .filter(s=>Number(s.outstanding_payable)>0)
+    .map(s=>({ name:s.name, bal:Number(s.outstanding_payable) }));
+  const totalPayable = supPayables.reduce((s,x)=>s+x.bal,0);
+
+  const fmt = v=>'Rs.'+v.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+  document.getElementById('bs-kpi-grid').innerHTML = [
+    { label:'Total Revenue', val:fmt(salesIncome), color:'green', icon:'fa-arrow-up' },
+    { label:'Total Expenses', val:fmt(totalExpenses+purchaseCost), color:'red', icon:'fa-arrow-down' },
+    { label:'Gross Profit', val:fmt(grossProfit), color:'cyan', icon:'fa-chart-line' },
+    { label:'Net Profit / Loss', val:fmt(netProfit), color: netProfit>=0?'green':'red', icon:'fa-balance-scale' },
+  ].map(k=>`
+    <div class="stat-card ${k.color}">
+      <div class="stat-header"><div class="stat-icon ${k.color}"><i class="fa ${k.icon}"></i></div></div>
+      <div class="stat-value">${k.val}</div>
+      <div class="stat-label">${k.label}</div>
+    </div>`).join('');
+
+  document.getElementById('bs-income-body').innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div class="flex-between" style="padding:10px;background:var(--bg-secondary);border-radius:8px">
+        <span style="font-size:13px">Sales Revenue</span>
+        <span class="fw-700 text-green">Rs.${salesIncome.toFixed(2)}</span>
+      </div>
+      <div class="flex-between" style="padding:10px;background:var(--green-glow);border:1px solid rgba(16,185,129,.2);border-radius:8px">
+        <span style="font-size:14px;font-weight:700">Total Revenue</span>
+        <span style="font-size:16px;font-weight:800;color:var(--green)">Rs.${salesIncome.toFixed(2)}</span>
+      </div>
+    </div>`;
+
+  document.getElementById('bs-expense-body').innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="flex-between" style="padding:9px 12px;background:var(--bg-secondary);border-radius:8px">
+        <span style="font-size:13px">Operating Expenses</span>
+        <span class="fw-700 text-red">Rs.${totalExpenses.toFixed(2)}</span>
+      </div>
+      <div class="flex-between" style="padding:9px 12px;background:var(--bg-secondary);border-radius:8px">
+        <span style="font-size:13px">Cost of Goods Sold</span>
+        <span class="fw-700 text-red">Rs.${purchaseCost.toFixed(2)}</span>
+      </div>
+      <div class="flex-between" style="padding:10px;background:var(--red-glow);border:1px solid rgba(239,68,68,.2);border-radius:8px">
+        <span style="font-size:14px;font-weight:700">Total Expenses</span>
+        <span style="font-size:16px;font-weight:800;color:var(--red)">Rs.${(totalExpenses+purchaseCost).toFixed(2)}</span>
+      </div>
+    </div>`;
+
+  document.getElementById('bs-receivables').innerHTML = `<table>
+    <thead><tr><th>Customer</th><th>Account</th><th>Balance Due</th></tr></thead>
+    <tbody>
+      ${custReceivables.map(x=>`<tr><td class="fw-700">${x.name}</td><td class="td-mono">${x.acc}</td><td class="fw-700 text-red">Rs.${x.bal.toFixed(2)}</td></tr>`).join('')}
+      <tr style="background:var(--bg-secondary)"><td colspan="2" class="fw-700">Total Receivable</td><td class="fw-700 text-red" style="font-size:14px">Rs.${totalReceivable.toFixed(2)}</td></tr>
+    </tbody></table>`;
+
+  document.getElementById('bs-payables').innerHTML = `<table>
+    <thead><tr><th>Supplier</th><th>Balance Owed</th></tr></thead>
+    <tbody>
+      ${supPayables.map(x=>`<tr><td class="fw-700">${x.name}</td><td class="fw-700 text-yellow">Rs.${x.bal.toFixed(2)}</td></tr>`).join('')}
+      <tr style="background:var(--bg-secondary)"><td class="fw-700">Total Payable</td><td class="fw-700 text-yellow" style="font-size:14px">Rs.${totalPayable.toFixed(2)}</td></tr>
+    </tbody></table>`;
+
+  const cashBalance = Number(cf.net_cash_flow);
+  document.getElementById('bs-pnl-body').innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+      <div>
+        <div style="font-size:13px;font-weight:700;color:var(--text-secondary);margin-bottom:12px;text-transform:uppercase;letter-spacing:.04em">Profit & Loss</div>
+        ${[
+          ['Sales Revenue', salesIncome, 'text-green'],
+          ['Cost of Goods', -purchaseCost, 'text-red'],
+          ['Gross Profit', grossProfit, grossProfit>=0?'text-green':'text-red'],
+          ['Operating Expenses', -totalExpenses, 'text-red'],
+          ['Net Profit / Loss', netProfit, netProfit>=0?'text-green':'text-red'],
+        ].map(([l,v,c])=>`
+          <div class="flex-between" style="padding:10px 14px;background:var(--bg-secondary);border-radius:8px;margin-bottom:6px">
+            <span style="font-size:13px">${l}</span>
+            <span class="fw-700 ${c}" style="font-size:14px">Rs.${Math.abs(v).toFixed(2)}</span>
+          </div>`).join('')}
+      </div>
+      <div>
+        <div style="font-size:13px;font-weight:700;color:var(--text-secondary);margin-bottom:12px;text-transform:uppercase;letter-spacing:.04em">Cash Position (Real)</div>
+        ${[
+          ['Cash In', Number(cf.cash_in), 'text-green'],
+          ['Receivable (Credit)', totalReceivable, 'text-accent'],
+          ['Payable (Owed)', -totalPayable, 'text-yellow'],
+          ['Cash Out', -Number(cf.cash_out), 'text-red'],
+          ['Net Cash Flow', cashBalance, cashBalance>=0?'text-green':'text-red'],
+        ].map(([l,v,c])=>`
+          <div class="flex-between" style="padding:10px 14px;background:var(--bg-secondary);border-radius:8px;margin-bottom:6px">
+            <span style="font-size:13px">${l}</span>
+            <span class="fw-700 ${c}" style="font-size:14px">Rs.${Math.abs(v).toFixed(2)}</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+async function printBalanceSheetA4() {
+  const [pl, custData, supData, expData] = await Promise.all([
+    FinanceAPI.profitLoss(), CustomersAPI.list({ page_size: 500 }),
+    SuppliersAPI.list({ page_size: 500 }), ExpensesAPI.summary(),
+  ]);
+  const salesIncome = Number(pl.income);
+  const totalExpenses = Number(pl.expenses);
+  const purchaseCost = Number(pl.cost_of_goods_sold);
+  const netProfit = Number(pl.net_profit);
+  const today = new Date().toLocaleDateString();
+
+  const custReceivables = (custData.results||custData)
+    .filter(c=>Number(c.outstanding_balance)>0)
+    .map(c=>({ name:c.name, acc:accNo(c.id, c.account_no), bal:Number(c.outstanding_balance) }));
+  const supPayables = (supData.results||supData)
+    .filter(s=>Number(s.outstanding_payable)>0)
+    .map(s=>({ name:s.name, bal:Number(s.outstanding_payable) }));
+
+  const expByCategory = {};
+  (expData.by_category||[]).forEach(e=>{ expByCategory[e.category__name||'Other'] = Number(e.total); });
+
+  const html = `<div class="a4-doc">
+    ${getInvoiceHeaderHtml('BALANCE SHEET', 'BS-'+Date.now().toString().slice(-6), today)}
+    <div style="font-size:16px;font-weight:800;color:#000;margin-bottom:5mm">Financial Position — ${today}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8mm;margin-bottom:6mm">
+      <div>
+        <div style="font-weight:700;font-size:12px;color:#777;text-transform:uppercase;margin-bottom:3mm;border-bottom:1px solid #ddd;padding-bottom:2mm">INCOME</div>
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <tr><td style="padding:4px 0">Total Sales Revenue</td><td style="text-align:right;font-weight:700;color:#16a34a">Rs.${salesIncome.toFixed(2)}</td></tr>
+        </table>
+        <div style="font-weight:700;font-size:12px;color:#777;text-transform:uppercase;margin:4mm 0 3mm;border-bottom:1px solid #ddd;padding-bottom:2mm">EXPENSES</div>
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          ${Object.entries(expByCategory).map(([k,v])=>`<tr><td style="padding:3px 0">${k}</td><td style="text-align:right;color:#dc2626">Rs.${v.toFixed(2)}</td></tr>`).join('')}
+          <tr><td style="padding:3px 0">Purchase/COGS</td><td style="text-align:right;color:#dc2626">Rs.${purchaseCost.toFixed(2)}</td></tr>
+          <tr style="font-weight:700;border-top:1px solid #000"><td style="padding:5px 0">Total Expenses</td><td style="text-align:right;color:#dc2626">Rs.${(totalExpenses+purchaseCost).toFixed(2)}</td></tr>
+        </table>
+        <div style="margin-top:4mm;padding:6px 10px;background:${netProfit>=0?'#f0fdf4':'#fef2f2'};border-radius:5px;display:flex;justify-content:space-between;font-weight:800;font-size:13px">
+          <span>Net ${netProfit>=0?'Profit':'Loss'}</span>
+          <span style="color:${netProfit>=0?'#16a34a':'#dc2626'}">Rs.${Math.abs(netProfit).toFixed(2)}</span>
+        </div>
+      </div>
+      <div>
+        <div style="font-weight:700;font-size:12px;color:#777;text-transform:uppercase;margin-bottom:3mm;border-bottom:1px solid #ddd;padding-bottom:2mm">CUSTOMER RECEIVABLES</div>
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead><tr><th style="text-align:left;padding:3px 0;color:#555">Customer</th><th style="text-align:right;padding:3px 0;color:#555">Balance</th></tr></thead>
+          <tbody>${custReceivables.map(x=>`<tr><td style="padding:3px 0">${x.name}</td><td style="text-align:right;color:#dc2626">Rs.${x.bal.toFixed(2)}</td></tr>`).join('')}</tbody>
+          <tr style="font-weight:700;border-top:1px solid #000"><td>Total</td><td style="text-align:right;color:#dc2626">Rs.${custReceivables.reduce((s,x)=>s+x.bal,0).toFixed(2)}</td></tr>
+        </table>
+        <div style="font-weight:700;font-size:12px;color:#777;text-transform:uppercase;margin:4mm 0 3mm;border-bottom:1px solid #ddd;padding-bottom:2mm">SUPPLIER PAYABLES</div>
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead><tr><th style="text-align:left;padding:3px 0;color:#555">Supplier</th><th style="text-align:right;padding:3px 0;color:#555">Owed</th></tr></thead>
+          <tbody>${supPayables.map(x=>`<tr><td style="padding:3px 0">${x.name}</td><td style="text-align:right;color:#b45309">Rs.${x.bal.toFixed(2)}</td></tr>`).join('')}</tbody>
+          <tr style="font-weight:700;border-top:1px solid #000"><td>Total</td><td style="text-align:right;color:#b45309">Rs.${supPayables.reduce((s,x)=>s+x.bal,0).toFixed(2)}</td></tr>
+        </table>
+      </div>
+    </div>
+    <div style="margin-top:8mm;display:grid;grid-template-columns:1fr 1fr;gap:20px;font-size:11px">
+      <div style="border-top:1px solid #000;padding-top:5px;text-align:center;color:#555">Prepared By</div>
+      <div style="border-top:1px solid #000;padding-top:5px;text-align:center;color:#555">Authorized By</div>
+    </div>
+    <div style="margin-top:6mm;font-size:10px;color:#999;text-align:center;border-top:1px solid #eee;padding-top:3mm">
+      SmartRetail ERP — Balance Sheet | Printed: ${new Date().toLocaleString()}
+    </div>
+  </div>`;
+  const pa = document.getElementById('print-area');
+  pa.innerHTML = html; pa.style.display='block';
+  window.print();
+  setTimeout(()=>{ pa.style.display='none'; },1200);
+}
+
+// ═══════════════════════════════════════════════════════
+// STOCK REPORT
+// ═══════════════════════════════════════════════════════
+// ── STOCK REPORT MODE ────────────────────────────────────
+let _srMode = 'all';
+
+function setSRMode(mode) {
+  _srMode = mode;
+  const allView    = document.getElementById('sr-all-view');
+  const singleView = document.getElementById('sr-single-view');
+  const allFilters = document.getElementById('sr-all-filters');
+  const singleFilters = document.getElementById('sr-single-filters');
+  const btnAll    = document.getElementById('sr-mode-all');
+  const btnSingle = document.getElementById('sr-mode-single');
+
+  if (mode === 'all') {
+    allView.style.display = '';
+    singleView.style.display = 'none';
+    allFilters.style.display = 'flex';
+    singleFilters.style.display = 'none';
+    btnAll.className = 'btn btn-accent btn-sm';
+    btnSingle.className = 'btn btn-ghost btn-sm';
+    renderStockReport();
+  } else {
+    allView.style.display = 'none';
+    singleView.style.display = '';
+    allFilters.style.display = 'none';
+    singleFilters.style.display = 'flex';
+    btnAll.className = 'btn btn-ghost btn-sm';
+    btnSingle.className = 'btn btn-accent btn-sm';
+    populateSRProductDropdown();
+  }
+}
+
+async function populateSRProductDropdown() {
+  const sel = document.getElementById('sr-product-select');
+  if (!sel) return;
+  if (!_invProductCache.length) await _loadInventoryData();
+  const q = (document.getElementById('sr-product-search')?.value || '').toLowerCase();
+  const filtered = _invProductCache.filter(p =>
+    !q || p.name.toLowerCase().includes(q) || (p.sku||'').toLowerCase().includes(q)
+  );
+  sel.innerHTML = '<option value="">— Choose a product —</option>' +
+    filtered.map(p => `<option value="${p.id}">📦 ${p.name} (${p.sku})</option>`).join('');
+}
+
+function filterSRProducts() {
+  populateSRProductDropdown();
+  // auto-select if only one result
+  const sel = document.getElementById('sr-product-select');
+  if (sel && sel.options.length === 2) {
+    sel.selectedIndex = 1;
+    renderSingleProductReport();
+  }
+}
+
+async function renderSingleProductReport() {
+  const sel = document.getElementById('sr-product-select');
+  const prodId = parseInt(sel?.value);
+  const placeholder = document.getElementById('sr-single-placeholder');
+  const content = document.getElementById('sr-single-content');
+
+  if (!prodId) {
+    placeholder.style.display = '';
+    content.style.display = 'none';
+    return;
+  }
+
+  if (!_invProductCache.length) await _loadInventoryData();
+  const p = _invProductCache.find(x => x.id === prodId);
+  if (!p) return;
+
+  placeholder.style.display = 'none';
+  content.style.display = '';
+
+  const remaining = (_invStockByProduct[prodId]||{}).quantity || 0;
+  const minStock = p.reorder_level || 10;
+  const value   = remaining * Number(p.final_price||p.selling_price||0);
+  const statusColor = remaining === 0 ? 'var(--red)' : remaining <= minStock ? 'var(--yellow)' : 'var(--green)';
+
+  document.getElementById('sr-prod-icon').textContent  = '📦';
+  document.getElementById('sr-prod-name').textContent  = p.name;
+  document.getElementById('sr-prod-sku').textContent   = p.sku;
+  document.getElementById('sr-prod-brand').textContent = p.brand_name || '—';
+  document.getElementById('sr-prod-cat').textContent   = p.category_name || '—';
+  document.getElementById('sr-prod-ppc').textContent   = 'N/A';
+
+  const stockEl = document.getElementById('sr-prod-stock');
+  stockEl.textContent = remaining + ' pcs';
+  stockEl.style.color = statusColor;
+  document.getElementById('sr-prod-cartons').textContent = '—';
+  document.getElementById('sr-prod-loose').textContent   = remaining + ' pcs';
+  document.getElementById('sr-prod-value').textContent   = 'Rs. ' + value.toFixed(0);
+
+  // Real sales history: fetch all sales, filter items by this product
+  const salesData = await SalesAPI.list({ page_size: 500 });
+  const salesRows = [];
+  // Exclude cancelled AND fully-returned sales — same fix as Order
+  // Summary/Collection: a returned invoice has zero net effect and
+  // shouldn't count as "sold" here. A partially-returned line only
+  // counts what's left after subtracting quantity_returned.
+  (salesData.results || salesData).filter(s => !['cancelled', 'returned'].includes(s.status)).forEach(s => {
+    (s.items||[]).filter(it => it.product === prodId).forEach(it => {
+      const netQty = it.quantity - Number(it.quantity_returned || 0);
+      if (netQty <= 0) return;
+      const netAmt = it.quantity ? Number(it.line_total) * (netQty / it.quantity) : 0;
+      salesRows.push({
+        date: (s.created_at||'').slice(0,10), invoice: s.invoice_number, customer: s.customer_name||'Walk-in',
+        qty: netQty, ctns: 0, lpcs: netQty, rate: Number(it.unit_price), amt: netAmt,
+      });
+    });
+  });
+  salesRows.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  const totalSold = salesRows.reduce((s, r) => s + r.qty, 0);
+  const totalRev  = salesRows.reduce((s, r) => s + r.amt, 0);
+
+  document.getElementById('sr-prod-history-label').textContent = salesRows.length + ' transaction(s) found';
+  document.getElementById('sr-prod-history-tbody').innerHTML = salesRows.length
+    ? salesRows.map((r) => `<tr>
+        <td>${r.date || '—'}</td>
+        <td class="td-mono">${r.invoice || '—'}</td>
+        <td style="font-weight:600">${r.customer}</td>
+        <td class="fw-700 text-accent">${r.qty} pcs</td>
+        <td>—</td>
+        <td>—</td>
+        <td>Rs. ${(r.rate || 0).toFixed(2)}</td>
+        <td class="fw-700 text-green">Rs. ${r.amt.toFixed(2)}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-muted)">No sales records found for this product</td></tr>';
+
+  document.getElementById('sr-prod-stats').innerHTML = [
+    { label: 'Total Sold (All Time)', val: totalSold + ' pcs', color: 'blue',   icon: 'fa-shopping-cart' },
+    { label: 'Total Revenue',          val: 'Rs. ' + totalRev.toFixed(0),  color: 'green',  icon: 'fa-rupee-sign' },
+    { label: 'Buy Price',              val: 'Rs. ' + Number(p.cost_price||0).toFixed(2), color: 'yellow', icon: 'fa-tag' },
+    { label: 'Sell Price',             val: 'Rs. ' + Number(p.selling_price||0).toFixed(2), color: 'purple', icon: 'fa-dollar-sign' },
+  ].map(k => `
+    <div class="stat-card ${k.color}">
+      <div class="stat-header"><div class="stat-icon ${k.color}"><i class="fa ${k.icon}"></i></div></div>
+      <div class="stat-value" style="font-size:20px">${k.val}</div>
+      <div class="stat-label">${k.label}</div>
+    </div>`).join('');
+
+  // Real stock movement log (inventory ledger, filtered to this product)
+  const txnData = await InventoryAPI.transactions({ product: prodId, page_size: 50 });
+  const movements = (txnData.results || txnData);
+  const positiveTypes = ['stock_in','adjustment_increase','transfer_in','purchase','sale_return'];
+  document.getElementById('sr-prod-movement-tbody').innerHTML = movements.length
+    ? movements.map(h => {
+        const signedQty = positiveTypes.includes(h.transaction_type) ? h.quantity : -h.quantity;
+        const typeLabel = h.transaction_type.replace(/_/g,' ');
+        const typeColor = signedQty < 0 ? 'var(--red)' : 'var(--green)';
+        return `<tr>
+          <td style="font-size:11px">${(h.created_at||'').slice(0,10)}</td>
+          <td><span class="badge ${signedQty<0?'badge-red':'badge-green'}">${typeLabel}</span></td>
+          <td style="font-weight:700;color:${typeColor}">${signedQty > 0 ? '+' : ''}${signedQty}</td>
+          <td>${h.balance_after - signedQty}</td>
+          <td style="font-weight:700">${h.balance_after}</td>
+          <td class="td-mono" style="font-size:11px">${h.reference || '—'}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-muted)">No movement records found</td></tr>';
+}
+
+async function renderStockReport() {
+  const today = new Date().toISOString().split('T')[0];
+  const srDate = document.getElementById('sr-date');
+  if (srDate && !srDate.value) srDate.value = today;
+  if (typeof syncDtDisplay === 'function') syncDtDisplay('sr-date');
+  const reportDate = srDate?.value || today;
+  const catFilter   = document.getElementById('sr-cat')?.value || '';
+  const stockFilter = document.getElementById('sr-stockfilter')?.value || '';
+
+  if (_srMode === 'single') { renderSingleProductReport(); return; }
+
+  await _loadInventoryData(); // reuses the Inventory page's product+stock cache
+
+  const catSel = document.getElementById('sr-cat');
+  if (catSel && catSel.options.length <= 1) {
+    const catData = await CategoriesAPI.list();
+    (catData.results || catData).forEach(c => {
+      const o = document.createElement('option');
+      o.value = c.name; o.text = c.name;
+      catSel.appendChild(o);
+    });
+  }
+  document.getElementById('sr-date-label').textContent = 'Report Date: ' + reportDate;
+
+  // Sold-today from real sales on that date. Excludes cancelled AND
+  // fully-returned sales, and nets out any partial-return quantity per
+  // line — same fix as Order Summary/Collection/product report above.
+  const soldMap = {};
+  const salesData = await SalesAPI.list({ page_size: 500 });
+  (salesData.results || salesData)
+    .filter(s => (s.created_at||'').slice(0,10) === reportDate && !['cancelled', 'returned'].includes(s.status))
+    .forEach(s => (s.items||[]).forEach(it => {
+      const netQty = it.quantity - Number(it.quantity_returned || 0);
+      if (netQty > 0) soldMap[it.product] = (soldMap[it.product]||0) + netQty;
+    }));
+
+  let prods = _invProductCache.map(p => {
+    const st = _invStockByProduct[p.id] || { quantity: 0 };
+    return { ...p, stock: st.quantity };
+  });
+  if (catFilter)              prods = prods.filter(p => p.category_name === catFilter);
+  if (stockFilter === 'low')  prods = prods.filter(p => p.stock > 0 && p.stock <= (p.reorder_level||10));
+  if (stockFilter === 'out')  prods = prods.filter(p => p.stock === 0);
+  if (stockFilter === 'ok')   prods = prods.filter(p => p.stock > (p.reorder_level||10));
+
+  const totalProds = prods.length;
+  const inStock    = prods.filter(p => p.stock > (p.reorder_level||10)).length;
+  const lowStock   = prods.filter(p => p.stock > 0 && p.stock <= (p.reorder_level||10)).length;
+  const outStock   = prods.filter(p => p.stock === 0).length;
+
+  document.getElementById('sr-stats-grid').innerHTML = [
+    { label: 'Total Products', val: totalProds, color: 'blue',   icon: 'fa-boxes' },
+    { label: 'In Stock',       val: inStock,    color: 'green',  icon: 'fa-check-circle' },
+    { label: 'Low Stock',      val: lowStock,   color: 'yellow', icon: 'fa-exclamation-circle' },
+    { label: 'Out of Stock',   val: outStock,   color: 'red',    icon: 'fa-times-circle' },
+  ].map(k => `
+    <div class="stat-card ${k.color}">
+      <div class="stat-header"><div class="stat-icon ${k.color}"><i class="fa ${k.icon}"></i></div></div>
+      <div class="stat-value">${k.val}</div>
+      <div class="stat-label">${k.label}</div>
+    </div>`).join('');
+
+  document.getElementById('sr-tbody').innerHTML = prods.map(p => {
+    const minStock = p.reorder_level || 10;
+    const soldToday    = soldMap[p.id] || 0;
+    const openingStock = p.stock + soldToday;
+    const remaining    = p.stock;
+    const val = remaining * Number(p.final_price||p.selling_price||0);
+    const statusColor = remaining === 0 ? 'red' : remaining <= minStock ? 'yellow' : 'green';
+    const statusText  = remaining === 0 ? 'Out of Stock' : remaining <= minStock ? 'Low Stock' : 'In Stock';
+    return `<tr>
+      <td>
+        <div class="flex-gap">
+          <span style="font-size:18px">📦</span>
+          <div>
+            <div style="font-weight:600">${p.name}</div>
+            <div style="font-size:11px;color:var(--text-muted)">${p.brand_name || ''}</div>
+          </div>
+        </div>
+      </td>
+      <td class="td-mono">${p.sku}</td>
+      <td><span class="badge badge-blue">${p.category_name}</span></td>
+      <td>${openingStock}</td>
+      <td class="text-red fw-700">${soldToday > 0 ? soldToday : '—'}</td>
+      <td class="fw-700" style="color:${remaining===0?'var(--red)':remaining<=minStock?'var(--yellow)':'var(--green)'}">${remaining}</td>
+      <td>—</td>
+      <td>${remaining}</td>
+      <td class="text-accent">Rs. ${val.toFixed(2)}</td>
+      <td><span class="badge badge-${statusColor}">${statusText}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+// Stock Report print customization — a per-device print-styling preference
+// (which columns/header elements appear on the printed sheet), not core
+// business data, so it's kept in localStorage rather than round-tripping
+// through the backend.
+const _SR_PREFS_KEY = 'stockReportPrintPrefs';
+const _srPrefDefaults = {
+  logo: true, address: true, sku: true, category: true, cartons: true, loose: true, value: true, sold: true, footer: '',
+};
+
+function _getStockReportPrefs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(_SR_PREFS_KEY) || '{}');
+    return { ..._srPrefDefaults, ...saved };
+  } catch (_) {
+    return { ..._srPrefDefaults };
+  }
+}
+
+function openStockReportSettings() {
+  const p = _getStockReportPrefs();
+  document.getElementById('sr-pref-logo').checked = p.logo;
+  document.getElementById('sr-pref-address').checked = p.address;
+  document.getElementById('sr-pref-sku').checked = p.sku;
+  document.getElementById('sr-pref-category').checked = p.category;
+  document.getElementById('sr-pref-cartons').checked = p.cartons;
+  document.getElementById('sr-pref-loose').checked = p.loose;
+  document.getElementById('sr-pref-value').checked = p.value;
+  document.getElementById('sr-pref-sold').checked = p.sold;
+  document.getElementById('sr-pref-footer').value = p.footer;
+  openModal('sr-settings-modal');
+}
+
+function saveStockReportSettings() {
+  const prefs = {
+    logo: document.getElementById('sr-pref-logo').checked,
+    address: document.getElementById('sr-pref-address').checked,
+    sku: document.getElementById('sr-pref-sku').checked,
+    category: document.getElementById('sr-pref-category').checked,
+    cartons: document.getElementById('sr-pref-cartons').checked,
+    loose: document.getElementById('sr-pref-loose').checked,
+    value: document.getElementById('sr-pref-value').checked,
+    sold: document.getElementById('sr-pref-sold').checked,
+    footer: document.getElementById('sr-pref-footer').value.trim(),
+  };
+  try {
+    localStorage.setItem(_SR_PREFS_KEY, JSON.stringify(prefs));
+    toast('Report print settings saved', 'success');
+  } catch (_) {
+    toast('Could not save settings on this device', 'warning');
+  }
+  closeModal('sr-settings-modal');
+}
+
+async function printStockReportA4() {
+  const prefs = _getStockReportPrefs();
+  const today = new Date().toISOString().split('T')[0];
+  const reportDate = document.getElementById('sr-date')?.value || today;
+
+  if (_srMode === 'single') {
+    // Print single product report
+    const sel = document.getElementById('sr-product-select');
+    const prodId = parseInt(sel?.value);
+    if (!prodId) { toast('Please select a product first', 'warning'); return; }
+    printSingleProductA4(prodId, reportDate);
+    return;
+  }
+
+  // Print filtered products — must match exactly what's shown on screen
+  // (renderStockReport), instead of always dumping the full _invProductCache
+  // regardless of the Category/Stock filters selected there.
+  const catFilter   = document.getElementById('sr-cat')?.value || '';
+  const stockFilter = document.getElementById('sr-stockfilter')?.value || '';
+
+  // Real quantity sold on reportDate per product — same computation (and
+  // same cancelled/returned/quantity_returned handling) as the on-screen
+  // Stock Report's own "Sold Today" figure. This was previously an empty
+  // object that never got filled in, so the Sold column always showed
+  // "—" and Opening (stock + sold) always silently came out equal to
+  // Remaining.
+  const soldMap = {};
+  const salesData = await SalesAPI.list({ page_size: 500 });
+  (salesData.results || salesData)
+    .filter(s => (s.created_at||'').slice(0,10) === reportDate && !['cancelled', 'returned'].includes(s.status))
+    .forEach(s => (s.items||[]).forEach(it => {
+      const netQty = it.quantity - Number(it.quantity_returned || 0);
+      if (netQty > 0) soldMap[it.product] = (soldMap[it.product]||0) + netQty;
+    }));
+
+  let prods = _invProductCache.map(p => ({ ...p, stock: (_invStockByProduct[p.id]||{}).quantity || 0 }));
+  if (catFilter)             prods = prods.filter(p => p.category_name === catFilter);
+  if (stockFilter === 'low') prods = prods.filter(p => p.stock > 0 && p.stock <= (p.reorder_level||10));
+  if (stockFilter === 'out') prods = prods.filter(p => p.stock === 0);
+  if (stockFilter === 'ok')  prods = prods.filter(p => p.stock > (p.reorder_level||10));
+  const totalValue = prods.reduce((s, p) => s + Number(p.final_price||p.selling_price||0) * p.stock, 0);
+  // Value of what was actually sold on reportDate — same "current
+  // price × quantity" valuation method as totalValue above (kept
+  // consistent rather than mixing in each sale's own historical price).
+  const totalSoldValue = prods.reduce((s, p) => s + Number(p.final_price||p.selling_price||0) * (soldMap[p.id]||0), 0);
+  const rows = prods.map((p, i) => {
+    const minStock = p.reorder_level || 10;
+    const sold = soldMap[p.id] || 0;
+    const opening = p.stock + sold;
+    const val = p.stock * Number(p.final_price||p.selling_price||0);
+    const st  = p.stock === 0 ? 'Out' : p.stock <= minStock ? 'Low' : 'OK';
+    return `<tr style="background:${i%2?'#f9f9f9':'#fff'}">
+      <td style="padding:6px 8px">${i+1}</td>
+      <td style="padding:6px 8px">📦 <strong>${p.name}</strong></td>
+      ${prefs.sku ? `<td style="padding:6px 8px;font-family:monospace">${p.sku}</td>` : ''}
+      ${prefs.category ? `<td style="padding:6px 8px">${p.category_name}</td>` : ''}
+      <td style="padding:6px 8px;text-align:center">${opening}</td>
+      ${prefs.sold ? `<td style="padding:6px 8px;text-align:center;color:#dc2626;font-weight:700">${sold > 0 ? sold : '—'}</td>` : ''}
+      <td style="padding:6px 8px;text-align:center;font-weight:800;color:${p.stock===0?'#dc2626':p.stock<=minStock?'#b45309':'#16a34a'}">${p.stock}</td>
+      ${prefs.cartons ? `<td style="padding:6px 8px;text-align:center">—</td>` : ''}
+      ${prefs.loose ? `<td style="padding:6px 8px;text-align:center">${p.stock}</td>` : ''}
+      ${prefs.value ? `<td style="padding:6px 8px;text-align:right">Rs. ${val.toFixed(2)}</td>` : ''}
+      <td style="padding:6px 8px;text-align:center;font-weight:700;color:${p.stock===0?'#dc2626':p.stock<=minStock?'#b45309':'#16a34a'}">${st}</td>
+    </tr>`;
+  }).join('');
+
+  const totalSoldQty = prods.reduce((s, p) => s + (soldMap[p.id]||0), 0);
+  const leadColspan  = 2 + (prefs.sku?1:0) + (prefs.category?1:0); // #, Product, [SKU], [Category]
+
+  const html = `<div class="a4-doc">
+    ${getInvoiceHeaderHtml('STOCK REPORT', 'SR-'+reportDate, reportDate, { showLogo: prefs.logo, showAddress: prefs.address })}
+    <div style="padding:5mm 0 3mm"><strong>Stock Report — ${reportDate}${catFilter?' — '+catFilter:''}</strong> &nbsp;·&nbsp; ${prods.length} products &nbsp;·&nbsp; Total Value: Rs. ${totalValue.toFixed(2)}</div>
+    ${(catFilter || stockFilter) ? `<div style="margin-bottom:3mm;font-size:10px;color:#555">Filtered by: ${catFilter ? 'Category = <strong>'+catFilter+'</strong>' : ''}${(catFilter && stockFilter) ? ' &nbsp;|&nbsp; ' : ''}${stockFilter ? 'Stock = <strong>'+({low:'Low Stock',out:'Out of Stock',ok:'In Stock'}[stockFilter]||stockFilter)+'</strong>' : ''}</div>` : ''}
+    <table style="width:100%;border-collapse:collapse;margin-bottom:5mm;font-size:10px">
+      <thead>
+        <tr>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important">#</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:left">Product</th>
+          ${prefs.sku ? '<th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important">SKU</th>' : ''}
+          ${prefs.category ? '<th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important">Category</th>' : ''}
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">Opening</th>
+          ${prefs.sold ? '<th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">Sold</th>' : ''}
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">Remaining</th>
+          ${prefs.cartons ? '<th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">Cartons</th>' : ''}
+          ${prefs.loose ? '<th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">Loose</th>' : ''}
+          ${prefs.value ? '<th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:right">Value</th>' : ''}
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">Status</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+      <tfoot>
+        <tr style="background:#d9d9d9 !important;color:#000 !important;font-weight:700;font-size:11px">
+          <td colspan="${leadColspan}" style="padding:7px 8px">TOTALS — ${prods.length} products</td>
+          <td style="padding:7px 8px"></td>
+          ${prefs.sold ? `<td style="padding:7px 8px;text-align:center">${totalSoldQty}</td>` : ''}
+          <td style="padding:7px 8px"></td>
+          ${prefs.cartons ? `<td style="padding:7px 8px"></td>` : ''}
+          ${prefs.loose ? `<td style="padding:7px 8px"></td>` : ''}
+          ${prefs.value ? `<td style="padding:7px 8px;text-align:right">Rs. ${totalValue.toFixed(2)}</td>` : ''}
+          <td style="padding:7px 8px"></td>
+        </tr>
+      </tfoot>
+    </table>
+    <div style="display:flex;justify-content:flex-end;gap:4mm;margin-bottom:5mm">
+      <div style="background:#fee2e2;border:2px solid #dc2626;border-radius:8px;padding:10px 20px;text-align:right;min-width:220px">
+        <div style="font-size:11px;color:#991b1b;font-weight:600;letter-spacing:.03em;text-transform:uppercase">Sold Amount (${reportDate})</div>
+        <div style="font-size:22px;font-weight:900;color:#000">Rs. ${totalSoldValue.toFixed(2)}</div>
+      </div>
+      <div style="background:#fef3c7;border:2px solid #f59e0b;border-radius:8px;padding:10px 20px;text-align:right;min-width:260px">
+        <div style="font-size:11px;color:#92400e;font-weight:600;letter-spacing:.03em;text-transform:uppercase">Remaining Stock Value</div>
+        <div style="font-size:22px;font-weight:900;color:#000">Rs. ${totalValue.toFixed(2)}</div>
+      </div>
+    </div>
+    ${prefs.footer ? `<div style="margin-bottom:4mm;font-size:10px;color:#555;font-style:italic">${prefs.footer}</div>` : ''}
+    <div style="margin-top:6mm;display:flex;justify-content:space-between;font-size:10px;color:#999;border-top:1px solid #eee;padding-top:3mm">
+      <span>SmartRetail ERP — Overall Stock Report</span>
+      <span>Date: ${reportDate} | Total Value: Rs. ${totalValue.toFixed(2)}</span>
+      <span>Printed: ${new Date().toLocaleString()}</span>
+    </div>
+  </div>`;
+  const pa = document.getElementById('print-area');
+  pa.innerHTML = html; pa.style.display = 'block';
+  window.print();
+  setTimeout(() => { pa.style.display = 'none'; }, 1200);
+}
+
+async function printSingleProductA4(prodId, reportDate) {
+  if (!_invProductCache.length) await _loadInventoryData();
+  const p = _invProductCache.find(x => x.id === prodId);
+  if (!p) return;
+  const remaining = (_invStockByProduct[prodId]||{}).quantity || 0;
+  const minStock = p.reorder_level || 10;
+  const value     = remaining * Number(p.final_price||p.selling_price||0);
+  const statusText = remaining === 0 ? 'OUT OF STOCK' : remaining <= minStock ? 'LOW STOCK' : 'IN STOCK';
+  const statusColor = remaining === 0 ? '#dc2626' : remaining <= minStock ? '#b45309' : '#16a34a';
+
+  // Gather real sales for this product. Excludes cancelled AND
+  // fully-returned sales, and nets out any partial-return quantity —
+  // same fix as the on-screen report above.
+  const salesData = await SalesAPI.list({ page_size: 500 });
+  const salesRows = [];
+  (salesData.results || salesData).filter(s => !['cancelled', 'returned'].includes(s.status)).forEach(s => {
+    (s.items||[]).filter(it => it.product === prodId).forEach(it => {
+      const netQty = it.quantity - Number(it.quantity_returned || 0);
+      if (netQty <= 0) return;
+      const netAmt = it.quantity ? Number(it.line_total) * (netQty / it.quantity) : 0;
+      salesRows.push({
+        date: (s.created_at||'').slice(0,10), invoice: s.invoice_number, customer: s.customer_name||'Walk-in',
+        qty: netQty, ctns: 0, lpcs: netQty, rate: Number(it.unit_price), amt: netAmt,
+      });
+    });
+  });
+  salesRows.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const totalSold = salesRows.reduce((s, r) => s + r.qty, 0);
+  const totalRev  = salesRows.reduce((s, r) => s + r.amt, 0);
+
+  // Real movement log
+  const txnData = await InventoryAPI.transactions({ product: prodId, page_size: 50 });
+  const positiveTypes = ['stock_in','adjustment_increase','transfer_in','purchase','sale_return'];
+  const movements = (txnData.results || txnData).map(h => {
+    const signedQty = positiveTypes.includes(h.transaction_type) ? h.quantity : -h.quantity;
+    return { date: (h.created_at||'').slice(0,10), type: h.transaction_type.replace(/_/g,' '),
+      qty: signedQty, before: h.balance_after - signedQty, after: h.balance_after, ref: h.reference };
+  });
+  const ppc = 1, cartons = 0, loose = remaining;
+
+  const html = `<div class="a4-doc">
+    ${getInvoiceHeaderHtml('STOCK REPORT', 'SR-PROD-'+reportDate, reportDate)}
+    <div style="padding:4mm 0 3mm">
+      <strong style="font-size:14px">Per Product Report — 📦 ${p.name}</strong>
+      <span style="margin-left:10px;font-family:monospace;font-size:11px;color:#555">${p.sku}</span>
+      <span style="margin-left:10px;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;background:${statusColor};color:#fff">${statusText}</span>
+    </div>
+
+    <!-- Product summary box -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:5mm">
+      ${[
+        { label:'Current Stock', val: remaining+' pcs', color:'#16a34a' },
+        { label:'Cartons',       val: ppc>1?cartons:'—', color:'#0284c7' },
+        { label:'Loose Pcs',     val: ppc>1?loose+' pcs':remaining+' pcs', color:'#b45309' },
+        { label:'Stock Value',   val:'Rs. '+value.toFixed(2), color:'#7c3aed' },
+      ].map(k=>`<div style="border:1px solid #ddd;border-radius:6px;padding:10px;text-align:center">
+        <div style="font-size:18px;font-weight:900;color:${k.color}">${k.val}</div>
+        <div style="font-size:10px;color:#777;margin-top:2px">${k.label}</div>
+      </div>`).join('')}
+    </div>
+
+    <!-- Product info -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:5mm;font-size:11px">
+      <div style="border:1px solid #ddd;border-radius:5px;padding:10px">
+        <div style="font-weight:700;font-size:10px;color:#777;margin-bottom:5px;text-transform:uppercase">Product Details</div>
+        <div>Brand: <strong>${p.brand_name||'—'}</strong></div>
+        <div>Category: <strong>${p.category_name||'—'}</strong></div>
+        <div>Pcs/Carton: <strong>N/A</strong></div>
+        <div>Min Stock: <strong>${minStock} pcs</strong></div>
+      </div>
+      <div style="border:1px solid #ddd;border-radius:5px;padding:10px">
+        <div style="font-weight:700;font-size:10px;color:#777;margin-bottom:5px;text-transform:uppercase">Pricing & Sales</div>
+        <div>Buy Price: <strong>Rs. ${Number(p.cost_price||0).toFixed(2)}</strong></div>
+        <div>Sell Price: <strong>Rs. ${Number(p.selling_price||0).toFixed(2)}</strong></div>
+        <div>Total Sold: <strong style="color:#dc2626">${totalSold} pcs</strong></div>
+        <div>Total Revenue: <strong style="color:#16a34a">Rs. ${totalRev.toFixed(2)}</strong></div>
+      </div>
+    </div>
+
+    <!-- Sales History -->
+    <div style="font-weight:800;font-size:12px;margin-bottom:3mm;color:#000">Sales History (${salesRows.length} transactions)</div>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:5mm;font-size:10px">
+      <thead>
+        <tr>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:left">Date</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:left">Invoice</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:left">Customer</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">Qty</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">Cartons</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">Loose</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:right">Rate</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:right">Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${salesRows.length ? salesRows.map((r,i)=>`<tr style="background:${i%2?'#f9f9f9':'#fff'}">
+          <td style="padding:5px 7px">${r.date||'—'}</td>
+          <td style="padding:5px 7px;font-family:monospace">${r.invoice||'—'}</td>
+          <td style="padding:5px 7px;font-weight:600">${r.customer}</td>
+          <td style="padding:5px 7px;text-align:center;font-weight:700">${r.qty} pcs</td>
+          <td style="padding:5px 7px;text-align:center">${r.ctns>0?r.ctns+' ctn':'—'}</td>
+          <td style="padding:5px 7px;text-align:center">${r.lpcs>0?r.lpcs+' pcs':'—'}</td>
+          <td style="padding:5px 7px;text-align:right">Rs. ${(r.rate||0).toFixed(2)}</td>
+          <td style="padding:5px 7px;text-align:right;font-weight:700">Rs. ${r.amt.toFixed(2)}</td>
+        </tr>`).join('') : '<tr><td colspan="8" style="text-align:center;padding:16px;color:#999">No sales records found</td></tr>'}
+      </tbody>
+      ${salesRows.length?`<tfoot><tr style="background:#d9d9d9 !important;color:#000 !important;font-weight:700;font-size:11px">
+        <td colspan="3" style="padding:6px 7px">TOTAL</td>
+        <td style="padding:6px 7px;text-align:center">${totalSold} pcs</td>
+        <td colspan="2"></td>
+        <td style="padding:6px 7px;text-align:right">—</td>
+        <td style="padding:6px 7px;text-align:right">Rs. ${totalRev.toFixed(2)}</td>
+      </tr></tfoot>`:''}
+    </table>
+
+    <!-- Stock Movement -->
+    <div style="font-weight:800;font-size:12px;margin-bottom:3mm;color:#000">Stock Movement Log (${movements.length} entries)</div>
+    <table style="width:100%;border-collapse:collapse;font-size:10px">
+      <thead>
+        <tr>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:left">Date/Time</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important">Type</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">Qty Change</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">Before</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important;text-align:center">After</th>
+          <th style="padding:6px 7px;background:#d9d9d9 !important;color:#000 !important">Reference</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${movements.length ? movements.map((h,i)=>`<tr style="background:${i%2?'#f9f9f9':'#fff'}">
+          <td style="padding:5px 7px;font-size:9px">${h.date||'—'}</td>
+          <td style="padding:5px 7px;font-weight:700;color:${h.type==='Sale'?'#dc2626':h.type==='Purchase'?'#16a34a':'#b45309'}">${h.type||'—'}</td>
+          <td style="padding:5px 7px;text-align:center;font-weight:700;color:${(h.qty||0)<0?'#dc2626':'#16a34a'}">${(h.qty||0)>0?'+':''}${h.qty||0}</td>
+          <td style="padding:5px 7px;text-align:center">${h.before??'—'}</td>
+          <td style="padding:5px 7px;text-align:center;font-weight:700">${h.after??'—'}</td>
+          <td style="padding:5px 7px;font-family:monospace;font-size:9px">${h.ref||'—'}</td>
+        </tr>`).join('') : '<tr><td colspan="6" style="text-align:center;padding:16px;color:#999">No movement records found</td></tr>'}
+      </tbody>
+    </table>
+
+    <div style="margin-top:6mm;display:flex;justify-content:space-between;font-size:10px;color:#999;border-top:1px solid #eee;padding-top:3mm">
+      <span>SmartRetail ERP — Per Product Stock Report</span>
+      <span>${p.name} | ${p.sku} | ${reportDate}</span>
+      <span>Printed: ${new Date().toLocaleString()}</span>
+    </div>
+  </div>`;
+  const pa = document.getElementById('print-area');
+  pa.innerHTML = html; pa.style.display = 'block';
+  window.print();
+  setTimeout(() => { pa.style.display = 'none'; }, 1200);
+}
+
+// ═══════════════════════════════════════════════════════
+// KEYBOARD SHORTCUTS
+// ═══════════════════════════════════════════════════════
+document.addEventListener('keydown', e => {
+  if (!currentUser) return;
+  if (e.ctrlKey && e.key === 'p') { e.preventDefault(); navigate('pos'); }
+  if (e.ctrlKey && e.key === 'd') { e.preventDefault(); navigate('dashboard'); }
+  if (e.key === 'Escape') {
+    if (document.getElementById('confirm-modal').classList.contains('open')) { _resolveConfirm(false); }
+    document.querySelectorAll('.modal-overlay.open').forEach(m => m.classList.remove('open'));
+    document.getElementById('notif-panel').classList.add('hidden');
+  }
+});
+
+// Set default dates for forms
+document.addEventListener('DOMContentLoaded', () => {
+  const today = new Date().toISOString().split('T')[0];
+  const fromEl = document.getElementById('rpt-from');
+  const toEl = document.getElementById('rpt-to');
+  if (fromEl) fromEl.value = '2025-01-01';
+  if (toEl) toEl.value = today;
+  if (document.getElementById('exp-date')) document.getElementById('exp-date').value = today;
+  // Set default tax from system settings
+  const bkTax = document.getElementById('bk-tax');
+  if (bkTax) bkTax.value = DB.sysSettings.taxRate||0;
+});
+// ── HELPER: print A4 content
+function printA4(contentId) {
+  const el = document.getElementById(contentId);
+  if (!el) { toast('Nothing to print','error'); return; }
+  const printArea = document.getElementById('print-area');
+  printArea.innerHTML = el.innerHTML;
+  printArea.style.display = 'block';
+  window.print();
+  setTimeout(() => { printArea.style.display = 'none'; }, 1000);
+}
+
+// ── A4 INVOICE PRINT (override receipt print button)
+//
+// Fixed: this used to build its own HTML from a legacy `order` shape
+// (order.total, order.invoice, order.items[i].price/qty, etc.) that never
+// matched the real Sale object the backend returns (total_amount,
+// invoice_number, previous_balance, items[i].unit_price/quantity, ...).
+// Because the field names didn't line up, this always rendered a broken
+// invoice — and since it was written before `previous_balance` existed on
+// Sale at all, it never had a "Previous Balance" line, even though the
+// backend was (correctly) saving/adding it to the sale and the customer's
+// ledger the whole time. That's why Save/Booking and the Ledger screen
+// always looked right, but the printed A4 invoice from this button never
+// showed the customer's previous balance.
+//
+// Now it reuses buildSlipA4Html() — the same, already-correct template used
+// by Sale Slips printing — which reads the real Sale fields and always
+// includes the Previous Balance / Net Payable lines.
+function printA4Invoice(order) {
+  if (!order) { toast('Nothing to print', 'error'); return; }
+
+  const cashReceived = parseFloat(document.getElementById('cash-received')?.value) || Number(order.total_amount) || 0;
+  const change = Math.max(0, cashReceived - (Number(order.total_amount) || 0));
+  const isCash = (order.payments && order.payments[0]?.method) === 'cash';
+
+  let html = buildSlipA4Html(order);
+  if (isCash) {
+    html += `<div class="a4-doc" style="page-break-before:always;margin:0;padding:10mm 12mm;box-sizing:border-box;font-size:11px">
+      <div style="display:flex;justify-content:flex-end">
+        <div style="width:66mm;border:1px solid #000;border-radius:4px;overflow:hidden;font-size:10.5px">
+          <div style="display:flex;justify-content:space-between;padding:4px 8px;border-bottom:1px solid #ddd;color:#000"><span>Cash Received</span><span>Rs. ${cashReceived.toFixed(2)}</span></div>
+          <div style="display:flex;justify-content:space-between;padding:4px 8px;color:#16a34a;font-weight:700"><span>Change</span><span>Rs. ${change.toFixed(2)}</span></div>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  const printArea = document.getElementById('print-area');
+  printArea.innerHTML = html;
+  printArea.style.display = 'block';
+  window.print();
+  setTimeout(() => { printArea.style.display = 'none'; }, 1000);
+}
+
+// ── WAREHOUSE ORDER SUMMARY ──────────────────────────────
+function openOrderSummary() {
+  const today = new Date().toISOString().split('T')[0];
+  const firstOfMonth = today.substring(0,8)+'01';
+  document.getElementById('ws-from').value = firstOfMonth;
+  document.getElementById('ws-to').value = today;
+  document.getElementById('warehouse-summary-result').innerHTML = '';
+  openModal('order-summary-modal');
+  generateWarehouseSummary();
+}
+
+function generateWarehouseSummary() {
+  const from = document.getElementById('ws-from').value;
+  const to = document.getElementById('ws-to').value;
+
+  // Aggregate all items sold in the date range
+  const allOrders = [...DB.orders, ...[
+    { invoice:'INV-0040', date:'2025-01-17 09:15', customer:'Ahmed Hassan', items:[{id:1,name:'Coca-Cola 330ml',qty:6,price:1.25},{id:2,name:'Lays Chips',qty:10,price:2.00}], total:27.50, status:'Completed' },
+    { invoice:'INV-0039', date:'2025-01-16 08:50', customer:'Walk-in', items:[{id:3,name:'Whole Milk 1L',qty:4,price:1.80},{id:5,name:'Dove Soap 100g',qty:12,price:1.50}], total:25.20, status:'Completed' },
+    { invoice:'INV-0038', date:'2025-01-15 14:00', customer:'Muhammad Ali', items:[{id:1,name:'Coca-Cola 330ml',qty:24,price:1.25},{id:9,name:'Shampoo 400ml',qty:3,price:5.99}], total:47.97, status:'Completed' },
+  ]];
+
+  const filtered = allOrders.filter(o => {
+    if (o.status !== 'Completed') return false;
+    const oDate = (o.date||'').split(' ')[0].split(',')[0];
+    return (!from || oDate >= from) && (!to || oDate <= to);
+  });
+
+  // Aggregate by product
+  const productMap = {};
+  filtered.forEach(order => {
+    (order.items||[]).forEach(item => {
+      const prod = DB.products.find(p => p.id === item.id || p.name === item.name);
+      const key = item.name;
+      if (!productMap[key]) {
+        productMap[key] = {
+          name: item.name,
+          totalQty: 0,
+          piecesPerCarton: prod?.piecesPerCarton || 1,
+          icon: prod?.icon || '📦',
+          category: prod?.category || '—',
+          currentStock: prod?.stock ?? '—',
+        };
+      }
+      productMap[key].totalQty += item.qty;
+    });
+  });
+
+  const rows = Object.values(productMap);
+  if (!rows.length) {
+    document.getElementById('warehouse-summary-result').innerHTML =
+      `<div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-box-open" style="font-size:40px;margin-bottom:12px"></i><div>No completed orders in this date range</div></div>`;
+    return;
+  }
+
+  const totalOrders = filtered.length;
+  const totalItems = rows.reduce((a,r) => a+r.totalQty, 0);
+
+  // Build print-ready HTML
+  const printHtml = `<div class="a4-doc" id="order-summary-print" style="color:#000;background:#fff">
+    <div class="a4-header">
+      <div>
+        <div class="a4-logo-name">🏪 SmartRetail Store</div>
+        <div style="font-size:11px;color:#555;margin-top:3px">123 Market Street, City</div>
+      </div>
+      <div class="a4-store-info">
+        <strong style="font-size:14px">WAREHOUSE DISPATCH</strong><br>
+        Period: ${from} to ${to}<br>
+        Generated: ${new Date().toLocaleString()}
+      </div>
+    </div>
+    <div class="a4-doc-title">📦 Order Dispatch Summary</div>
+    <div class="a4-meta" style="margin-bottom:5mm">
+      <div class="a4-meta-row"><span class="a4-meta-label">Total Orders:</span><span class="a4-meta-val">${totalOrders}</span></div>
+      <div class="a4-meta-row"><span class="a4-meta-label">Total Items:</span><span class="a4-meta-val">${totalItems} pcs</span></div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Product</th>
+          <th>Category</th>
+          <th>Total Qty (pcs)</th>
+          <th>Cartons Out</th>
+          <th>Loose Pieces</th>
+          <th>Remaining Stock</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((r,i) => {
+          const ppc = r.piecesPerCarton > 1 ? r.piecesPerCarton : 1;
+          const cartons = Math.floor(r.totalQty / ppc);
+          const loose = r.totalQty % ppc;
+          return `<tr>
+            <td>${i+1}</td>
+            <td><strong>${r.icon} ${r.name}</strong></td>
+            <td>${r.category}</td>
+            <td><strong>${r.totalQty}</strong></td>
+            <td class="carton-cell">${ppc>1?`<span class="ctn">${cartons} ctn</span>`:'—'}</td>
+            <td class="carton-cell">${ppc>1?`<span class="loose">${loose} pcs</span>`:`<span class="ctn">${r.totalQty}</span>`}</td>
+            <td style="color:${r.currentStock==='—'?'#555':r.currentStock<=5?'#dc2626':'#16a34a'}"><strong>${r.currentStock}</strong> pcs</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+    <div class="a4-footer">
+      <span>SmartRetail ERP — Warehouse Dispatch Report</span>
+      <span>Period: ${from} → ${to}</span>
+      <span>Printed: ${new Date().toLocaleDateString()}</span>
+    </div>
+  </div>`;
+
+  // Show in dark-mode table for screen
+  document.getElementById('warehouse-summary-result').innerHTML = `
+    <div style="margin-bottom:12px;display:flex;gap:12px">
+      <div class="stat-card blue" style="flex:1;padding:14px">
+        <div class="stat-value" style="font-size:22px">${totalOrders}</div>
+        <div class="stat-label">Orders in Period</div>
+      </div>
+      <div class="stat-card green" style="flex:1;padding:14px">
+        <div class="stat-value" style="font-size:22px">${totalItems}</div>
+        <div class="stat-label">Total Pieces Out</div>
+      </div>
+      <div class="stat-card purple" style="flex:1;padding:14px">
+        <div class="stat-value" style="font-size:22px">${rows.length}</div>
+        <div class="stat-label">Products Dispatched</div>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Product</th><th>Category</th><th>Total Qty</th><th>📦 Cartons Out</th><th>Loose Pieces</th><th>Current Stock</th></tr></thead>
+        <tbody>
+          ${rows.map((r,i) => {
+            const ppc = r.piecesPerCarton > 1 ? r.piecesPerCarton : 1;
+            const cartons = Math.floor(r.totalQty / ppc);
+            const loose = r.totalQty % ppc;
+            return `<tr>
+              <td>${i+1}</td>
+              <td><div class="flex-gap"><span style="font-size:18px">${r.icon}</span><strong>${r.name}</strong></div></td>
+              <td><span class="badge badge-blue">${r.category}</span></td>
+              <td class="fw-700">${r.totalQty} pcs</td>
+              <td>${ppc>1?`<span class="badge badge-cyan">📦 ${cartons} Carton${cartons!==1?'s':''}</span>`:'—'}</td>
+              <td>${ppc>1?`<span class="badge badge-yellow">${loose} pcs loose</span>`:`<span class="badge badge-blue">${r.totalQty} pcs</span>`}</td>
+              <td class="${r.currentStock<=5?'text-red':r.currentStock==='—'?'':'text-green'} fw-700">${r.currentStock} pcs</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div style="display:none" id="order-summary-print">${printHtml}</div>`;
+}
+
+// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
+// SUPPLY ROUTES MODULE
+// ═══════════════════════════════════════════════════════
+DB.routes = DB.routes || [
+  { id:1, name:'North Zone A', area:'Model Town, Johar Town', person:'Saleem Khan', days:['Monday','Wednesday','Friday'], suppliers:[1,2], status:'Active', notes:'Morning slot preferred' },
+  { id:2, name:'South Zone B', area:'DHA, Cantt', person:'Tariq Mehmood', days:['Tuesday','Thursday'], suppliers:[3,4], status:'Active', notes:'' },
+  { id:3, name:'East Zone C', area:'Gulberg, Garden Town', person:'Asif Raza', days:['Monday','Saturday'], suppliers:[2,5], status:'Active', notes:'' },
+];
+let _routeWeekOffset = 0;
+const DAYS_OF_WEEK = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+const ROUTE_PALETTE = CHART_PALETTE;
+
+function getWeekDates(offset) {
+  const now = new Date();
+  const day = now.getDay();
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - (day === 0 ? 6 : day - 1) + offset * 7);
+  return DAYS_OF_WEEK.map((d, i) => {
+    const dt = new Date(monday);
+    dt.setDate(monday.getDate() + i);
+    return dt;
+  });
+}
+
+let _routeCache = [];
+
+async function renderSupplyRoutes() {
+  const data = await RoutesAPI.list({ page_size: 500 });
+  _routeCache = data.results || data;
+  // Stats
+  const routes = _routeCache;
+  const todayName = DAYS_OF_WEEK[(new Date().getDay() + 6) % 7]; // Mon=0
+  const uniqueReps = [...new Set(routes.map(r => r.person).filter(Boolean))];
+  document.getElementById('sr-stat-total').textContent  = routes.length;
+  document.getElementById('sr-stat-active').textContent = routes.filter(r => r.status === 'Active').length;
+  document.getElementById('sr-stat-today').textContent  = routes.filter(r => r.days.includes(todayName) && r.status === 'Active').length;
+  document.getElementById('sr-stat-reps').textContent   = uniqueReps.length;
+
+  renderCalendarGrid();
+  renderRouteCards();
+}
+
+function renderCalendarGrid() {
+  const dates  = getWeekDates(_routeWeekOffset);
+  const routes = _routeCache.filter(r => r.status !== 'Inactive' || true);
+  const start  = dates[0], end = dates[6];
+
+  document.getElementById('sr-week-label').textContent =
+    start.toLocaleDateString('en-GB',{day:'numeric',month:'short'}) + ' – ' +
+    end.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+
+  // Build HTML
+  const dayColW = 'calc((100% - 140px) / 7)';
+  let html = `<div style="display:flex;border-bottom:1px solid var(--border)">
+    <div style="width:140px;flex-shrink:0;padding:12px 16px;background:var(--bg-secondary);font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;display:flex;align-items:center">Route</div>`;
+
+  dates.forEach((dt, i) => {
+    const isToday = dt.toDateString() === new Date().toDateString();
+    html += `<div style="flex:1;padding:10px 6px;text-align:center;background:${isToday?'var(--accent-glow)':'var(--bg-secondary)'};border-left:1px solid var(--border)${isToday?';border-top:2px solid var(--accent)':''}">
+      <div style="font-size:10px;font-weight:700;color:${isToday?'var(--accent)':'var(--text-muted)'};text-transform:uppercase;letter-spacing:.05em">${DAYS_OF_WEEK[i].slice(0,3)}</div>
+      <div style="font-size:18px;font-weight:800;color:${isToday?'var(--accent)':'var(--text-primary)'};line-height:1.2">${dt.getDate()}</div>
+      <div style="font-size:10px;color:var(--text-muted)">${dt.toLocaleDateString('en-GB',{month:'short'})}</div>
+    </div>`;
+  });
+  html += '</div>';
+
+  if (!routes.length) {
+    html += `<div style="padding:40px;text-align:center;color:var(--text-muted);font-size:13px">
+      <i class="fa fa-route" style="font-size:32px;display:block;margin-bottom:10px"></i>No routes yet. Click "New Route" to add one.
+    </div>`;
+  } else {
+    routes.forEach((r, ri) => {
+      const color = ROUTE_PALETTE[ri % ROUTE_PALETTE.length];
+      html += `<div style="display:flex;border-bottom:1px solid var(--border);transition:background .15s" onmouseover="this.style.background='var(--bg-card-hover)'" onmouseout="this.style.background=''">
+        <div style="width:140px;flex-shrink:0;padding:10px 16px;display:flex;align-items:center;gap:8px">
+          <div style="width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0"></div>
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--text-primary);line-height:1.2">${r.name}</div>
+            <div style="font-size:10px;color:var(--text-muted);margin-top:1px">${r.person||'—'}</div>
+          </div>
+        </div>`;
+      DAYS_OF_WEEK.forEach((day, di) => {
+        const active = r.days.includes(day);
+        const cellDate = new Date(dates[di]); cellDate.setHours(0,0,0,0);
+        const todayDate = new Date(); todayDate.setHours(0,0,0,0);
+        const isToday = cellDate.getTime() === todayDate.getTime();
+        const isFuture = cellDate.getTime() > todayDate.getTime();
+        html += `<div style="flex:1;padding:8px 4px;display:flex;align-items:center;justify-content:center;border-left:1px solid var(--border);background:${isToday&&active?'rgba(234,108,77,.06)':''}">
+          ${active
+            ? (isFuture
+                ? `<div style="background:var(--yellow-glow);border:1px solid rgba(245,158,11,.4);border-radius:6px;padding:4px 8px;text-align:center;width:90%">
+                     <i class="fa fa-clock" style="color:var(--yellow);font-size:10px;display:block;margin-bottom:1px"></i>
+                     <span style="font-size:9px;font-weight:700;color:var(--yellow)">Pending</span>
+                   </div>`
+                : `<div style="background:${color}22;border:1px solid ${color}55;border-radius:6px;padding:4px 8px;text-align:center;width:90%">
+                     <i class="fa fa-check" style="color:${color};font-size:10px;display:block;margin-bottom:1px"></i>
+                     <span style="font-size:9px;font-weight:700;color:${color}">Visit</span>
+                   </div>`)
+            : `<div style="width:20px;height:2px;background:var(--border);border-radius:2px;margin:0 auto"></div>`
+          }
+        </div>`;
+      });
+      html += '</div>';
+    });
+  }
+
+  document.getElementById('sr-calendar-grid').innerHTML = html;
+}
+
+function shiftRouteWeek(dir) {
+  if (dir === 0) { _routeWeekOffset = 0; }
+  else { _routeWeekOffset += dir; }
+  renderCalendarGrid();
+  // Update week label
+  const dates = getWeekDates(_routeWeekOffset);
+  document.getElementById('sr-week-label').textContent =
+    dates[0].toLocaleDateString('en-GB',{day:'numeric',month:'short'}) + ' – ' +
+    dates[6].toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+}
+
+function renderRouteCards() {
+  const q   = (document.getElementById('sr-search')?.value||'').toLowerCase();
+  const sf  = document.getElementById('sr-status-filter')?.value||'';
+  const routes = _routeCache.filter(r =>
+    (!sf || r.status === sf) &&
+    (!q  || r.name.toLowerCase().includes(q) || (r.area||'').toLowerCase().includes(q) || (r.person||'').toLowerCase().includes(q))
+  );
+
+  const container = document.getElementById('sr-route-cards');
+  if (!routes.length) {
+    container.innerHTML = `<div style="grid-column:1/-1;padding:40px;text-align:center;color:var(--text-muted)">
+      <i class="fa fa-search" style="font-size:28px;display:block;margin-bottom:10px"></i>No routes match your filter.
+    </div>`;
+    return;
+  }
+
+  container.innerHTML = routes.map((r, ri) => {
+    const color = ROUTE_PALETTE[ri % ROUTE_PALETTE.length];
+    const suppNames = r.supplier_names||[];
+    const todayName = DAYS_OF_WEEK[(new Date().getDay() + 6) % 7];
+    const isActiveToday = r.days.includes(todayName) && r.status === 'Active';
+    return `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:all .2s;cursor:default"
+        onmouseover="this.style.borderColor='${color}';this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(0,0,0,.3)'"
+        onmouseout="this.style.borderColor='var(--border)';this.style.transform='';this.style.boxShadow=''">
+      <!-- color bar -->
+      <div style="height:4px;background:linear-gradient(90deg,${color},${color}88)"></div>
+      <div style="padding:16px 18px">
+        <!-- header -->
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="width:40px;height:40px;border-radius:10px;background:${color}22;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">
+              <i class="fa fa-route" style="color:${color}"></i>
+            </div>
+            <div>
+              <div style="font-size:14px;font-weight:800;color:var(--text-primary)">${r.name}</div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:1px"><i class="fa fa-map-pin" style="margin-right:3px"></i>${r.area||'No area set'}</div>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+            <span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;background:${r.status==='Active'?'var(--green-glow)':'var(--red-glow)'};color:${r.status==='Active'?'var(--green)':'var(--red)'}">● ${r.status}</span>
+            ${isActiveToday ? `<span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px;background:var(--yellow-glow);color:var(--yellow)">TODAY</span>` : ''}
+          </div>
+        </div>
+
+        <!-- rep -->
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg-secondary);border-radius:8px;margin-bottom:12px">
+          <div style="width:28px;height:28px;border-radius:50%;background:${color}33;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:${color}">${(r.person||'?')[0].toUpperCase()}</div>
+          <div>
+            <div style="font-size:11px;font-weight:600;color:var(--text-primary)">${r.person||'Unassigned'}</div>
+            <div style="font-size:10px;color:var(--text-muted)">Field Representative</div>
+          </div>
+        </div>
+
+        <!-- days -->
+        <div style="display:flex;gap:4px;margin-bottom:12px">
+          ${DAYS_OF_WEEK.map(d => {
+            const on = r.days.includes(d);
+            return `<div style="flex:1;text-align:center;padding:4px 2px;border-radius:5px;background:${on?color+'22':'var(--bg-secondary)'};border:1px solid ${on?color+'55':'var(--border)'};font-size:9px;font-weight:700;color:${on?color:'var(--text-muted)'}">
+              ${d.slice(0,2)}
+            </div>`;
+          }).join('')}
+        </div>
+
+        <!-- suppliers -->
+        ${suppNames.length ? `<div style="margin-bottom:12px">
+          <div style="font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Suppliers</div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px">
+            ${suppNames.map(s=>`<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-secondary)">${s}</span>`).join('')}
+          </div>
+        </div>` : ''}
+
+        ${r.notes ? `<div style="font-size:11px;color:var(--text-muted);padding:6px 10px;background:var(--bg-secondary);border-radius:6px;border-left:2px solid ${color};margin-bottom:12px">
+          <i class="fa fa-sticky-note" style="margin-right:4px"></i>${r.notes}
+        </div>` : ''}
+
+        <!-- actions -->
+        <div style="display:flex;gap:8px;padding-top:10px;border-top:1px solid var(--border)">
+          <button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center" onclick="editRoute(${r.id})">
+            <i class="fa fa-edit"></i> Edit
+          </button>
+          <button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center;color:var(--red)" onclick="deleteRoute(${r.id})">
+            <i class="fa fa-trash"></i> Delete
+          </button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// Alias so old calls still work
+function renderRoutesTable() { renderRouteCards(); }
+
+async function openRouteModal() {
+  document.getElementById('route-modal-title').textContent = 'Add New Route';
+  document.getElementById('route-edit-id').value = '';
+  ['rt-name','rt-area','rt-person','rt-notes'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('rt-status').value = 'Active';
+  // Reset day toggles
+  document.querySelectorAll('.rt-day-toggle').forEach(el => el.classList.remove('active'));
+  _initDayToggles([]);
+  await _initSupplierToggles([]);
+  openModal('route-modal');
+}
+
+async function editRoute(id) {
+  const r = _routeCache.find(x => x.id === id);
+  if (!r) return;
+  document.getElementById('route-modal-title').textContent = 'Edit Route';
+  document.getElementById('route-edit-id').value = r.id;
+  document.getElementById('rt-name').value  = r.name;
+  document.getElementById('rt-area').value  = r.area||'';
+  document.getElementById('rt-person').value = r.person||'';
+  document.getElementById('rt-notes').value = r.notes||'';
+  document.getElementById('rt-status').value = r.status||'Active';
+  _initDayToggles(r.days||[]);
+  await _initSupplierToggles(r.suppliers||[]);
+  openModal('route-modal');
+}
+
+function _initDayToggles(activeDays) {
+  document.querySelectorAll('.rt-day-toggle').forEach(el => {
+    const day = el.getAttribute('data-day');
+    const isOn = activeDays.includes(day);
+    el.style.cssText = `
+      display:flex;align-items:center;justify-content:center;
+      padding:10px 4px;border-radius:8px;cursor:pointer;
+      font-size:11px;font-weight:700;text-align:center;
+      border:1.5px solid ${isOn?'var(--accent)':'var(--border)'};
+      background:${isOn?'var(--accent-glow)':'var(--bg-secondary)'};
+      color:${isOn?'var(--accent)':'var(--text-muted)'};
+      transition:all .15s;
+    `;
+    el._active = isOn;
+    el.onclick = function() {
+      this._active = !this._active;
+      this.style.borderColor  = this._active ? 'var(--accent)' : 'var(--border)';
+      this.style.background   = this._active ? 'var(--accent-glow)' : 'var(--bg-secondary)';
+      this.style.color        = this._active ? 'var(--accent)' : 'var(--text-muted)';
+    };
+  });
+}
+
+async function _initSupplierToggles(activeIds) {
+  const supData = await SuppliersAPI.list({ page_size: 500 });
+  const suppliers = supData.results || supData;
+  document.getElementById('rt-supplier-list').innerHTML = suppliers.map(s => {
+    const isOn = activeIds.includes(s.id);
+    return `<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;cursor:pointer;
+        border:1.5px solid ${isOn?'var(--green)':'var(--border)'};
+        background:${isOn?'var(--green-glow)':'var(--bg-secondary)'};
+        font-size:12px;color:${isOn?'var(--green)':'var(--text-secondary)'};transition:all .15s"
+      onclick="this.classList.toggle('rt-sup-on');this.style.borderColor=this.classList.contains('rt-sup-on')?'var(--green)':'var(--border)';this.style.background=this.classList.contains('rt-sup-on')?'var(--green-glow)':'var(--bg-secondary)';this.style.color=this.classList.contains('rt-sup-on')?'var(--green)':'var(--text-secondary)'">
+      <input type="checkbox" class="rt-sup-cb" value="${s.id}" ${isOn?'checked':''} style="display:none">
+      <i class="fa fa-building" style="font-size:11px"></i> ${s.name}
+    </label>`;
+  }).join('');
+}
+
+async function saveRoute() {
+  const name = document.getElementById('rt-name').value.trim();
+  if (!name) { toast('Route name is required!','error'); return; }
+  const days = Array.from(document.querySelectorAll('.rt-day-toggle')).filter(el => el._active).map(el => el.getAttribute('data-day'));
+  const suppliers = Array.from(document.querySelectorAll('.rt-sup-cb:checked')).map(c => parseInt(c.value));
+  const payload = {
+    name,
+    area:    document.getElementById('rt-area').value.trim(),
+    person:  document.getElementById('rt-person').value.trim(),
+    notes:   document.getElementById('rt-notes').value.trim(),
+    status:  document.getElementById('rt-status').value,
+    days, suppliers
+  };
+  const editId = parseInt(document.getElementById('route-edit-id').value);
+  try {
+    if (editId) {
+      await RoutesAPI.update(editId, payload);
+      toastDone('update', 'Route', name);
+    } else {
+      await RoutesAPI.create(payload);
+      toastDone('add', 'Route', name);
+    }
+    closeModal('route-modal');
+    renderSupplyRoutes();
+  } catch (err) {
+    toast(err.message || 'Failed to save route', 'error');
+  }
+}
+
+async function deleteRoute(id) {
+  if (!(await confirmModal('This supply route will be permanently removed.', { title: 'Delete Route?', confirmText: 'Delete Route' }))) return;
+  try {
+    await RoutesAPI.remove(id);
+    renderSupplyRoutes();
+    toastDone('delete', 'Route');
+  } catch (err) {
+    toast(err.message || 'Failed to delete route', 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// ORDER SUMMARY MODULE
+// ═══════════════════════════════════════════════════════
+let _osBookingsCache = [];
+
+// ══════════════════════════════════════════════════════════════
+// Modern Date & Time Picker — theme-aware replacement for the
+// native browser date/time inputs (used by Order Summary filters).
+// Each field is a hidden input (holds the real "YYYY-MM-DD" / "HH:MM"
+// value that the rest of the app reads) paired with a visible,
+// readonly display input that opens a styled dropdown panel.
+// ══════════════════════════════════════════════════════════════
+(function(){
+  let activePanel = null;
+  function closeActivePanel(){
+    if (activePanel) { activePanel.remove(); activePanel = null; }
+    document.querySelectorAll('.dt-picker-input.dt-active').forEach(el => el.classList.remove('dt-active'));
+  }
+  document.addEventListener('click', (e) => {
+    if (activePanel && !activePanel.contains(e.target) && !e.target.classList.contains('dt-picker-input')) {
+      closeActivePanel();
+    }
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeActivePanel(); });
+  // The panel is now `position:fixed` (see openPanel below) so it doesn't
+  // travel with any scrollable container — close it on scroll/resize
+  // rather than leaving it floating over the wrong spot.
+  // BUT scrolling the hour/minute lists INSIDE the panel is a scroll event too
+  // (captured here) — it used to close the panel the moment you scrolled it,
+  // or when a pick re-centred the list.
+  window.addEventListener('scroll', (e) => {
+    if (activePanel && e.target && e.target.nodeType === 1 && activePanel.contains(e.target)) return;
+    closeActivePanel();
+  }, true);
+  window.addEventListener('resize', () => closeActivePanel());
+
+  const pad = n => String(n).padStart(2,'0');
+  const fmtISO = (y,m,d) => `${y}-${pad(m+1)}-${pad(d)}`;
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  window.formatDtDateDisplay = function(iso){
+    if (!iso) return '';
+    const [y,m,d] = iso.split('-').map(Number);
+    return `${pad(d)} ${MONTHS_SHORT[m-1]} ${y}`;
+  };
+  window.formatDtTimeDisplay = function(hm){
+    if (!hm) return '';
+    const [h,m] = hm.split(':').map(Number);
+    let h12 = h % 12; if (h12===0) h12 = 12;
+    return `${pad(h12)}:${pad(m)} ${h<12?'AM':'PM'}`;
+  };
+  window.syncDtDisplay = function(id){
+    const hidden  = document.getElementById(id);
+    const display = document.getElementById(id+'-display');
+    if (!hidden || !display) return;
+    display.value = id.includes('time') ? formatDtTimeDisplay(hidden.value) : formatDtDateDisplay(hidden.value);
+  };
+
+  function openPanel(panel, wrap, displayEl){
+    // Appended to <body> and positioned with `fixed` coordinates from the
+    // wrap's own on-screen position — NOT appended inside `wrap` itself —
+    // so the panel can never get clipped by an ancestor card's
+    // `overflow: hidden` (which every .card has, for its own rounded
+    // corners) no matter which page or card this picker sits inside.
+    document.body.appendChild(panel);
+    const rect = wrap.getBoundingClientRect();
+    panel.style.position = 'fixed';
+    panel.style.top = Math.round(rect.bottom + 8) + 'px';
+    panel.style.left = Math.round(rect.left) + 'px';
+    // Keep it fully on-screen if opening near the right edge.
+    requestAnimationFrame(() => {
+      const pRect = panel.getBoundingClientRect();
+      const overflowX = pRect.right - (window.innerWidth - 8);
+      if (overflowX > 0) panel.style.left = Math.round(Math.max(8, rect.left - overflowX)) + 'px';
+      // Phones: if there isn't room below the field, open it above instead.
+      const overflowY = pRect.bottom - (window.innerHeight - 8);
+      if (overflowY > 0) {
+        const above = rect.top - 8 - pRect.height;
+        panel.style.top = Math.round(above >= 8 ? above : Math.max(8, window.innerHeight - 8 - pRect.height)) + 'px';
+      }
+    });
+    activePanel = panel;
+    displayEl.classList.add('dt-active');
+  }
+
+  function openDatePicker(hiddenInput, displayEl, onSelect){
+    closeActivePanel();
+    const wrap = hiddenInput.closest('.dt-picker-wrap');
+    const base = hiddenInput.value ? new Date(hiddenInput.value+'T00:00:00') : new Date();
+    let viewY = base.getFullYear(), viewM = base.getMonth();
+    const selected = hiddenInput.value || '';
+    const panel = document.createElement('div');
+    panel.className = 'dt-picker-panel dt-cal';
+
+    function render(){
+      const first = new Date(viewY, viewM, 1);
+      const startDow = first.getDay();
+      const daysInMonth = new Date(viewY, viewM+1, 0).getDate();
+      const daysInPrev = new Date(viewY, viewM, 0).getDate();
+      const todayStr = fmtISO(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+      let cells = '';
+      for (let i = startDow-1; i >= 0; i--) cells += `<div class="dt-cal-day muted">${daysInPrev-i}</div>`;
+      for (let d = 1; d <= daysInMonth; d++){
+        const dateStr = fmtISO(viewY, viewM, d);
+        const cls = ['dt-cal-day'];
+        if (dateStr === todayStr) cls.push('today');
+        if (dateStr === selected) cls.push('selected');
+        cells += `<div class="${cls.join(' ')}" data-date="${dateStr}">${d}</div>`;
+      }
+      const trailing = (7 - ((startDow + daysInMonth) % 7)) % 7;
+      for (let d = 1; d <= trailing; d++) cells += `<div class="dt-cal-day muted">${d}</div>`;
+
+      panel.innerHTML = `
+        <div class="dt-cal-head">
+          <button class="dt-cal-nav" type="button" data-nav="-1"><i class="fa fa-chevron-left"></i></button>
+          <div class="dt-cal-title">${MONTHS[viewM]} ${viewY}</div>
+          <button class="dt-cal-nav" type="button" data-nav="1"><i class="fa fa-chevron-right"></i></button>
+        </div>
+        <div class="dt-cal-grid">
+          ${['S','M','T','W','T','F','S'].map(d=>`<div class="dt-cal-dow">${d}</div>`).join('')}
+          ${cells}
+        </div>
+        <div class="dt-cal-footer">
+          <button class="dt-cal-today-btn" type="button">Today</button>
+          <button class="dt-cal-clear-btn" type="button">Clear</button>
+        </div>`;
+
+      panel.querySelectorAll('.dt-cal-nav').forEach(btn => {
+        btn.onclick = (e) => { e.stopPropagation(); viewM += Number(btn.dataset.nav); if (viewM<0){viewM=11;viewY--;} if (viewM>11){viewM=0;viewY++;} render(); };
+      });
+      panel.querySelectorAll('.dt-cal-day[data-date]').forEach(el => {
+        el.onclick = (e) => { e.stopPropagation(); onSelect(el.dataset.date); closeActivePanel(); };
+      });
+      panel.querySelector('.dt-cal-today-btn').onclick = (e) => { e.stopPropagation(); const t=new Date(); onSelect(fmtISO(t.getFullYear(),t.getMonth(),t.getDate())); closeActivePanel(); };
+      panel.querySelector('.dt-cal-clear-btn').onclick = (e) => { e.stopPropagation(); onSelect(''); closeActivePanel(); };
+    }
+    render();
+    openPanel(panel, wrap, displayEl);
+  }
+
+  function openTimePicker(hiddenInput, displayEl, onSelect){
+    closeActivePanel();
+    const wrap = hiddenInput.closest('.dt-picker-wrap');
+    let h24 = null, m = 0;
+    if (hiddenInput.value) { const [hh,mm] = hiddenInput.value.split(':').map(Number); h24 = hh; m = mm; }
+    let h12 = h24 === null ? null : (h24 % 12 === 0 ? 12 : h24 % 12);
+    let ampm = h24 === null ? 'AM' : (h24 < 12 ? 'AM' : 'PM');
+    const panel = document.createElement('div');
+    panel.className = 'dt-picker-panel dt-time';
+
+    function centerSelected(){
+      // Centre each list on its selected row by moving ONLY that list's own
+      // scrollTop (scrollIntoView would also scroll the page behind it).
+      panel.querySelectorAll('.dt-time-col').forEach(col => {
+        const el = col.querySelector('.dt-time-opt.selected');
+        if (el) col.scrollTop = el.offsetTop - (col.clientHeight - el.offsetHeight) / 2;
+      });
+    }
+    function render(){
+      // Keep each list where the user had scrolled it across re-renders.
+      const prevTops = Array.from(panel.querySelectorAll('.dt-time-col')).map(c => c.scrollTop);
+      const hours = Array.from({length:12}, (_,i)=>i+1);
+      const mins  = Array.from({length:60}, (_,i)=>i);
+      panel.innerHTML = `
+        <div class="dt-time-cols">
+          <div class="dt-time-col">${hours.map(hh=>`<div class="dt-time-opt ${hh===h12?'selected':''}" data-h="${hh}">${pad(hh)}</div>`).join('')}</div>
+          <div class="dt-time-col">${mins.map(mm=>`<div class="dt-time-opt ${mm===m?'selected':''}" data-m="${mm}">${pad(mm)}</div>`).join('')}</div>
+          <div class="dt-time-col">
+            <div class="dt-time-opt ${ampm==='AM'?'selected':''}" data-ap="AM">AM</div>
+            <div class="dt-time-opt ${ampm==='PM'?'selected':''}" data-ap="PM">PM</div>
+          </div>
+        </div>
+        <div class="dt-time-footer">
+          <button class="dt-time-now-btn" type="button">Now</button>
+          <button class="dt-time-clear-btn" type="button">Clear</button>
+        </div>`;
+
+      panel.querySelectorAll('[data-h]').forEach(el => { el.onclick = (e)=>{ e.stopPropagation(); h12=Number(el.dataset.h); if(h24===null) h24=0; commit(); }; });
+      panel.querySelectorAll('[data-m]').forEach(el => { el.onclick = (e)=>{ e.stopPropagation(); m=Number(el.dataset.m); if(h24===null) h24=0; commit(); }; });
+      panel.querySelectorAll('[data-ap]').forEach(el => { el.onclick = (e)=>{ e.stopPropagation(); ampm=el.dataset.ap; if(h24===null) h24=0; commit(); }; });
+      panel.querySelector('.dt-time-now-btn').onclick = (e)=>{ e.stopPropagation(); const t=new Date(); onSelect(`${pad(t.getHours())}:${pad(t.getMinutes())}`); closeActivePanel(); };
+      panel.querySelector('.dt-time-clear-btn').onclick = (e)=>{ e.stopPropagation(); onSelect(''); closeActivePanel(); };
+      if (prevTops.length) panel.querySelectorAll('.dt-time-col').forEach((c, i) => { c.scrollTop = prevTops[i] || 0; });
+      else if (panel.isConnected) centerSelected();
+    }
+    function commit(){
+      if (h12 === null) h12 = 12;
+      let hh = h12 % 12; if (ampm === 'PM') hh += 12;
+      onSelect(`${pad(hh)}:${pad(m)}`);
+      render();
+    }
+    render();
+    openPanel(panel, wrap, displayEl);
+    centerSelected();
+  }
+
+  window.wireModernDateTimeInputs = function(){
+    [['os-date-from','date'], ['os-date-to','date'], ['os-time-from','time'], ['os-time-to','time'],
+     ['col-date-from','date'], ['col-date-to','date'], ['col-time-from','time'], ['col-time-to','time'],
+     ['bk-date-filter','date'], ['ss-date-from','date'], ['ss-date-to','date'], ['ss-time-from','time'], ['ss-time-to','time'], ['sr-date','date'], ['sr-date-from','date'], ['sr-date-to','date'],
+     ['rpt-from','date'], ['rpt-to','date'], ['ldg-from','date'], ['ldg-to','date'], ['ws-from','date'], ['ws-to','date'],
+     ['pr-date-from','date'], ['pr-date-to','date'], ['pb-date','date']].forEach(([id,type]) => {
+      const hidden  = document.getElementById(id);
+      const display = document.getElementById(id+'-display');
+      if (!hidden || !display || display.dataset.dtWired) return;
+      display.dataset.dtWired = '1';
+      // Any code that sets hidden.value = '...' (defaults, Clear buttons) now
+      // refreshes the visible text automatically.
+      try {
+        const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        Object.defineProperty(hidden, 'value', {
+          configurable: true,
+          get() { return desc.get.call(this); },
+          set(v) { desc.set.call(this, v); syncDtDisplay(id); },
+        });
+      } catch (e) {}
+      syncDtDisplay(id);
+      display.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const onSelect = (val) => { hidden.value = val; syncDtDisplay(id); hidden.dispatchEvent(new Event('change')); };
+        if (type === 'date') openDatePicker(hidden, display, onSelect);
+        else openTimePicker(hidden, display, onSelect);
+      });
+    });
+  };
+})();
+
+function openOrderSummaryTab() {
+  // Default the page to TODAY's summary on open, instead of an unbounded
+  // range that silently included every past order.
+  const fromEl = document.getElementById('os-date-from');
+  const toEl   = document.getElementById('os-date-to');
+  if (fromEl && toEl && !fromEl.value && !toEl.value) {
+    const today = new Date().toISOString().split('T')[0];
+    fromEl.value = today;
+    toEl.value   = today;
+  }
+  wireModernDateTimeInputs();
+  syncDtDisplay('os-date-from'); syncDtDisplay('os-date-to');
+  syncDtDisplay('os-time-from'); syncDtDisplay('os-time-to');
+  renderOrderSummary();
+}
+
+async function renderOrderSummary() {
+  // Date and time are independent: leaving either side (from/to, date/time)
+  // blank simply means "no limit" on that side — you are never forced to
+  // fill both. e.g. clearing "From" just removes the lower bound and the
+  // result follows "To" alone.
+  const fromDate = document.getElementById('os-date-from')?.value || '';
+  const toDate   = document.getElementById('os-date-to')?.value   || '';
+  const fromTime = document.getElementById('os-time-from')?.value || '';
+  const toTime   = document.getElementById('os-time-to')?.value   || '';
+
+  // Build full lower/upper datetime boundaries only from the sides that are
+  // actually filled in. A time with no date on that side is ignored (there's
+  // nothing to anchor it to).
+  const fromDT = fromDate ? `${fromDate}T${fromTime || '00:00'}` : '';
+  const toDT   = toDate   ? `${toDate}T${toTime   || '23:59'}` : '';
+
+  const q          = (document.getElementById('os-search')?.value||'').toLowerCase();
+  const usernameFilter = document.getElementById('os-username-filter')?.value || '';
+
+  const salesData = await SalesAPI.list({ page_size: 500 });
+  // Exclude cancelled AND fully-returned sales — a fully-returned invoice
+  // (the usual way to "cancel" a wrongly-created/duplicate bill) has zero
+  // net effect and shouldn't count as an order here at all. A
+  // partially-returned sale keeps its remaining (non-returned) items;
+  // its own total_amount is already net of the return (see process_return
+  // in services.py, which nets the refund off the invoice's total_amount
+  // at the source) — nothing further to subtract here.
+  _osBookingsCache = (salesData.results || salesData).filter(s => !['cancelled', 'returned'].includes(s.status));
+
+  // Populate username (served_by) dropdown
+  const usDd = document.getElementById('os-username-filter');
+  if (usDd) {
+    const uniqueUsers = [...new Set(_osBookingsCache.map(b => b.served_by_name).filter(Boolean))].sort();
+    const current = usDd.value;
+    usDd.innerHTML = '<option value="">All Users</option>' +
+      uniqueUsers.map(u => `<option value="${u}" ${u===current?'selected':''}>${u}</option>`).join('');
+    if (current) usDd.value = current;
+  }
+
+  const bookings = _osBookingsCache.filter(b => {
+    const bDT = (b.created_at||'').slice(0,16); // "YYYY-MM-DDTHH:MM"
+    if (fromDT && bDT < fromDT) return false;
+    if (toDT   && bDT > toDT)   return false;
+    if (usernameFilter && (b.served_by_name||'') !== usernameFilter) return false;
+    return true;
+  });
+
+  const finOrders   = bookings.length;
+  const finAmount   = bookings.reduce((s,b) => s+Number(b.total_amount), 0);
+  const finTax      = bookings.reduce((s,b) => s+Number(b.tax_amount), 0);
+  const finDiscount = bookings.reduce((s,b) => s+Number(b.discount_amount), 0);
+  const finReceived = bookings.reduce((s,b) => s+Number(b.paid_amount), 0);
+  const finPending  = Math.max(0, finAmount - finReceived);
+
+  const f = v => 'Rs.' + v.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+  const setEl = (id,v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
+  setEl('os-fin-orders',   finOrders.toLocaleString());
+  setEl('os-fin-amount',   f(finAmount));
+  setEl('os-fin-tax',      f(finTax));
+  setEl('os-fin-discount', f(finDiscount));
+  setEl('os-fin-pending',  f(finPending));
+  setEl('os-fin-received', f(finReceived));
+
+  const usBadge = document.getElementById('os-username-badge');
+  if (usBadge) {
+    usBadge.style.display = usernameFilter ? '' : 'none';
+    if (usernameFilter) {
+      usBadge.innerHTML = `<i class="fa fa-user-tag"></i> Showing orders by: <strong>${usernameFilter}</strong> <button onclick="document.getElementById('os-username-filter').value='';renderOrderSummary()" style="background:none;border:none;color:var(--red);cursor:pointer;margin-left:6px;font-size:12px">✕ Clear</button>`;
+    }
+  }
+
+  // Aggregate per product from real sale items
+  const productMap = {};
+  bookings.forEach(bk => {
+    (bk.items||[]).forEach(it => {
+      // Subtract whatever's already been returned on this line — a
+      // partially-returned invoice should only count what's actually
+      // still sold, not the original booked quantity.
+      const netQty = it.quantity - Number(it.quantity_returned || 0);
+      if (netQty <= 0) return;
+      const key = it.product;
+      if (!productMap[key]) {
+        productMap[key] = {
+          name: it.product_name, icon: '📦', sku: it.product_sku || '—',
+          piecesPerCarton: 1, buyPrice: Number(it.unit_price),
+          totalPieces: 0, orderCount: 0,
+        };
+      }
+      productMap[key].totalPieces += netQty;
+      productMap[key].orderCount++;
+    });
+  });
+
+  let rows = Object.values(productMap).filter(r =>
+    !q || r.name.toLowerCase().includes(q) || r.sku.toLowerCase().includes(q)
+  );
+
+  // KPI values
+  const totalOrders  = bookings.length;
+  const totalPieces  = rows.reduce((a,r) => a + r.totalPieces, 0);
+  const totalCartons = rows.reduce((a,r) => a + Math.floor(r.totalPieces / Math.max(r.piecesPerCarton,1)), 0);
+  const totalCost    = rows.reduce((a,r) => a + r.totalPieces * r.buyPrice, 0);
+
+  document.getElementById('os-total-orders').textContent  = totalOrders.toLocaleString();
+  document.getElementById('os-total-pieces').textContent  = totalPieces.toLocaleString();
+  document.getElementById('os-total-cartons').textContent = totalCartons.toLocaleString();
+  document.getElementById('os-total-cost').textContent    = 'Rs.' + totalCost.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+
+  const tbody = document.getElementById('os-table-body');
+  const empty = document.getElementById('os-empty');
+  const table = document.getElementById('os-main-table');
+
+  if (!rows.length) {
+    tbody.innerHTML = '';
+    table.style.display = 'none';
+    empty.style.display = '';
+    if (!bookings.length && !_osBookingsCache.length) {
+      document.getElementById('os-empty-msg').innerHTML =
+        'Save confirmed bookings in the <strong>Order Booking</strong> module — they will appear here with full carton &amp; piece counts.';
+    } else {
+      document.getElementById('os-empty-msg').textContent = 'No matching orders found for the selected filters.';
+    }
+  } else {
+    empty.style.display = 'none';
+    table.style.display = '';
+    rows.sort((a,b) => b.totalPieces - a.totalPieces);
+    tbody.innerHTML = rows.map((r, i) => {
+      const ppc     = Math.max(r.piecesPerCarton, 1);
+      const cartons = Math.floor(r.totalPieces / ppc);
+      const loose   = r.totalPieces % ppc;
+      const cost    = r.totalPieces * r.buyPrice;
+      return `<tr style="${i % 2 === 0 ? '' : 'background:rgba(255,255,255,.02)'}">
+        <td>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:20px">${r.icon}</span>
+            <div>
+              <div style="font-weight:700;font-size:13px">${r.name}</div>
+            </div>
+          </div>
+        </td>
+        <td class="td-mono" style="font-size:11px">${r.sku}</td>
+        <td style="text-align:center">
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:var(--purple-glow);color:var(--purple);font-size:11px;font-weight:700">${r.orderCount}</span>
+        </td>
+        <td style="text-align:center">
+          <strong style="color:var(--green);font-size:14px">${r.totalPieces.toLocaleString()}</strong>
+        </td>
+        <td style="text-align:center;color:var(--text-muted)">${ppc}</td>
+        <td style="text-align:center">
+          <span style="background:var(--accent-glow);color:var(--accent);font-weight:700;padding:3px 10px;border-radius:6px;font-size:13px">${cartons}</span>
+        </td>
+        <td style="text-align:center">
+          ${loose > 0
+            ? `<span style="background:var(--yellow-glow);color:var(--yellow);font-weight:700;padding:3px 8px;border-radius:6px;font-size:12px">${loose}</span>`
+            : `<span style="color:var(--text-muted);font-size:12px">—</span>`}
+        </td>
+        <td style="text-align:right;color:var(--text-secondary)">Rs.${r.buyPrice.toFixed(2)}</td>
+        <td style="text-align:right">
+          <strong style="color:var(--green)">Rs.${cost.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',')}</strong>
+        </td>
+      </tr>`;
+    }).join('') +
+    `<tr style="background:var(--bg-secondary);border-top:2px solid var(--border)">
+      <td colspan="3" style="font-weight:800;font-size:12px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">TOTALS</td>
+      <td style="text-align:center;font-weight:800;color:var(--green)">${totalPieces.toLocaleString()}</td>
+      <td></td>
+      <td style="text-align:center;font-weight:800;color:var(--accent)">${totalCartons.toLocaleString()}</td>
+      <td></td>
+      <td></td>
+      <td style="text-align:right;font-weight:800;color:var(--green)">Rs.${totalCost.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',')}</td>
+    </tr>`;
+  }
+  applyOsColumnVisibility();
+}
+
+function clearOsFilter() {
+  document.getElementById('os-date-from').value = '';
+  document.getElementById('os-date-to').value   = '';
+  const tf = document.getElementById('os-time-from'); if (tf) tf.value = '';
+  const tt = document.getElementById('os-time-to');   if (tt) tt.value = '';
+  syncDtDisplay('os-date-from'); syncDtDisplay('os-date-to');
+  syncDtDisplay('os-time-from'); syncDtDisplay('os-time-to');
+  document.getElementById('os-search').value    = '';
+  const usDd = document.getElementById('os-username-filter');
+  if (usDd) usDd.value = '';
+  renderOrderSummary();
+}
+
+function exportOrderSummaryCsv() {
+  const usernameFilter = document.getElementById('os-username-filter')?.value || '';
+  const fromDate = document.getElementById('os-date-from')?.value || '';
+  const toDate   = document.getElementById('os-date-to')?.value   || '';
+  const fromTime = document.getElementById('os-time-from')?.value || '';
+  const toTime   = document.getElementById('os-time-to')?.value   || '';
+  const fromDT = fromDate ? `${fromDate}T${fromTime || '00:00'}` : '';
+  const toDT   = toDate   ? `${toDate}T${toTime   || '23:59'}` : '';
+
+  const bookings = _osBookingsCache.filter(b => {
+    const bDT = (b.created_at||'').slice(0,16);
+    if (fromDT && bDT < fromDT) return false;
+    if (toDT   && bDT > toDT)   return false;
+    if (usernameFilter && (b.served_by_name||'') !== usernameFilter) return false;
+    return true;
+  });
+
+  const headers = ['Invoice','Date','Customer','Account','Username','Subtotal','Tax','Discount','Total','Paid','Status'];
+  const dataRows = bookings.map(b => [
+    b.invoice_number, (b.created_at||'').slice(0,10), b.customer_name||'Walk-in', b.customer?(accNo(b.customer, b.customer_account_no)):'', b.served_by_name||'',
+    Number(b.subtotal).toFixed(2), Number(b.tax_amount).toFixed(2), Number(b.discount_amount).toFixed(2),
+    Number(b.total_amount).toFixed(2), Number(b.paid_amount).toFixed(2), b.status
+  ]);
+  const csv = [headers, ...dataRows].map(r => r.map(v => `"${v}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `order-summary${usernameFilter?'-'+usernameFilter:''}-${new Date().toISOString().split('T')[0]}.csv`;
+  a.click(); URL.revokeObjectURL(a.href);
+  toast('Order summary exported!', 'success');
+}
+
+async function printOrderSummary() {
+  const usernameFilter = document.getElementById('os-username-filter')?.value || '';
+
+  // Column list in DOM order (mirrors OS_COLUMN_MAP) — filtered by osSettings
+  // so the printed table always matches what's configured in Order Summary
+  // Settings, instead of a hardcoded header that ignored it.
+  const allCols = [
+    { key: null,             label: 'Product' },   // always shown
+    { key: 'showSku',        label: 'SKU' },
+    { key: 'showOrders',     label: 'Orders' },
+    { key: 'showPieces',     label: 'Total Pcs' },
+    { key: 'showPcsPerCtn',  label: 'Pcs/Ctn' },
+    { key: 'showCartonsOut', label: 'Cartons' },
+    { key: 'showLoosePcs',   label: 'Loose' },
+    { key: 'showUnitCost',   label: 'Unit Cost' },
+    { key: 'showTotalCost',  label: 'Total Cost' },
+  ];
+  const visibleCols = allCols.filter(c => c.key === null || osSettings[c.key] !== false);
+  const visibleIdx = visibleCols.map(c => allCols.indexOf(c));
+
+  const rows = [];
+  document.querySelectorAll('#os-table-body tr:not(:last-child)').forEach(tr => {
+    // textContent (not innerText) so a column hidden on-screen via
+    // display:none still has its real value available here — we pick
+    // exactly which columns to include ourselves via visibleIdx.
+    const allCells = Array.from(tr.querySelectorAll('td')).map(td => td.textContent.trim());
+    if (allCells.length) rows.push(visibleIdx.map(i => allCells[i] ?? ''));
+  });
+
+  const today = new Date().toLocaleDateString();
+  const finCards = [
+    { key: 'finShowOrders',   label: 'Total Orders',    id: 'os-fin-orders',   bg: '#f0f9ff', border: '#bae6fd' },
+    { key: 'finShowAmount',   label: 'Total Amount',    id: 'os-fin-amount',   bg: '#f0fdf4', border: '#bbf7d0' },
+    { key: 'finShowTax',      label: 'Tax',              id: 'os-fin-tax',      bg: '#fefce8', border: '#fde68a' },
+    { key: 'finShowDiscount', label: 'Discount',         id: 'os-fin-discount', bg: '#fef2f2', border: '#fecaca' },
+    { key: 'finShowPending',  label: 'Pending Balance',  id: 'os-fin-pending',  bg: '#f5f3ff', border: '#ddd6fe' },
+    { key: 'finShowReceived', label: 'Received',         id: 'os-fin-received', bg: '#ecfdf5', border: '#6ee7b7' },
+  ].filter(c => osSettings[c.key] !== false);
+
+  const finStripHtml = finCards.length ? `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px;font-size:11px">
+      ${finCards.map(c => `<div style="padding:8px 10px;background:${c.bg};border:1px solid ${c.border};border-radius:6px"><div style="color:#555;margin-bottom:2px">${c.label}</div><strong>${document.getElementById(c.id)?.textContent || '—'}</strong></div>`).join('')}
+    </div>` : '';
+
+  const s = (typeof _companySettingsCache !== 'undefined' && _companySettingsCache) || {};
+  const storeName = s.company_name || 'SmartRetail Store';
+  const logoBlock = s.logo
+    ? `<img src="${s.logo}" style="max-width:44px;max-height:38px;object-fit:contain;vertical-align:middle;margin-right:8px">`
+    : `<span style="font-size:22px;line-height:1;vertical-align:middle;margin-right:6px">🏪</span>`;
+
+  const html = `<div class="a4-doc">
+    <div class="a4-header">
+      <div><div class="a4-logo-name">${logoBlock}${storeName}</div><div style="font-size:11px;color:#555;margin-top:3px">Warehouse Dispatch Summary${usernameFilter?' — User: '+usernameFilter:''}</div></div>
+      <div class="a4-store-info"><strong>ORDER SUMMARY</strong><br>Generated: ${today}<br>By: ${currentUser?.full_name||'Admin'}</div>
+    </div>
+    <div class="a4-doc-title">Order Summary — Cartons &amp; Pieces Dispatched</div>
+    ${finStripHtml}
+    <table>
+      <thead><tr>${visibleCols.map(c=>`<th>${c.label}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody>
+    </table>
+    <div style="margin-top:14px;padding:10px 14px;border:1.5px solid #ddd;border-radius:6px;display:flex;flex-wrap:wrap;gap:20px;font-size:12px;background:#f9fafb">
+      <span>🧩 Pieces: <strong>${document.getElementById('os-total-pieces').textContent}</strong></span>
+      <span>💰 Warehouse Cost: <strong>${document.getElementById('os-total-cost').textContent}</strong></span>
+    </div>
+    <div class="a4-footer"><span>SmartRetail ERP — Order Summary</span><span>Printed: ${today}</span></div>
+  </div>`;
+  const printArea = document.getElementById('print-area');
+  printArea.innerHTML = html;
+  await animatedPrint('order', printArea);
+  setTimeout(() => { printArea.style.display = 'none'; }, 1000);
+}
+
+// Set default date range on load + apply saved OS visibility
+document.addEventListener('DOMContentLoaded', () => {
+  const fromEl = document.getElementById('os-date-from');
+  const toEl   = document.getElementById('os-date-to');
+  if (fromEl && !fromEl.value) {
+    const d = new Date(); d.setDate(d.getDate() - 30);
+    fromEl.value = d.toISOString().split('T')[0];
+  }
+  if (toEl && !toEl.value) toEl.value = new Date().toISOString().split('T')[0];
+  wireModernDateTimeInputs();
+  syncDtDisplay('os-date-from'); syncDtDisplay('os-date-to');
+  syncDtDisplay('os-time-from'); syncDtDisplay('os-time-to');
+  // Apply saved show/hide for fin KPI cards
+  applyOsFinKpiVisibility();
+});
+function toggleTheme() {
+  const isLight = document.body.classList.toggle('light-mode');
+  localStorage.setItem('smartretail_theme', isLight ? 'light' : 'dark');
+  // Update charts for new theme.
+  // Fixed: this used to call a renderDashboardCharts() function that
+  // doesn't exist anywhere in the app — the call always threw and was
+  // silently swallowed by the catch below, so switching theme never
+  // actually redrew any chart's colors; they'd only pick up the new theme
+  // the next time you happened to navigate away and back. Now it redraws
+  // whichever chart-bearing page is actually open.
+  setTimeout(() => {
+    try { if (document.getElementById('categoryChart')) renderDashboard(); } catch (e) {}
+    try { if (document.getElementById('productBubbleChart')) renderProductBubbleChart(); } catch (e) {}
+  }, 50);
+}
+
+function initTheme() {
+  const saved = localStorage.getItem('smartretail_theme');
+  if (saved === 'light') {
+    document.body.classList.add('light-mode');
+  }
+}
+
+// ── SIDEBAR TOGGLE (Mobile) ───────────────────────────
+function toggleSidebar() {
+  const sidebar = document.querySelector('.sidebar');
+  const overlay = document.getElementById('sidebar-overlay');
+  const isOpen  = sidebar.classList.toggle('mobile-open');
+  overlay.classList.toggle('open', isOpen);
+  document.body.style.overflow = isOpen ? 'hidden' : '';
+  document.body.classList.toggle('sidebar-open', isOpen);
+}
+
+function closeSidebarMobile() {
+  const sidebar = document.querySelector('.sidebar');
+  const overlay = document.getElementById('sidebar-overlay');
+  sidebar.classList.remove('mobile-open');
+  overlay.classList.remove('open');
+  document.body.style.overflow = '';
+  document.body.classList.remove('sidebar-open');
+}
+
+// ── SIDEBAR COLLAPSE (Desktop, icon-only mode) ────────────────────────
+// Independent of the mobile drawer above — this is the "shrink to icons,
+// expand back to full width whenever you want" toggle for desktop, with
+// the choice remembered across page loads via localStorage.
+const SIDEBAR_COLLAPSE_KEY = 'smartretail_sidebar_collapsed';
+
+function toggleSidebarCollapse() {
+  const sidebar = document.querySelector('.sidebar');
+  if (!sidebar) return;
+  const collapsed = sidebar.classList.toggle('collapsed');
+  document.body.classList.toggle('sidebar-collapsed', collapsed);
+  try { localStorage.setItem(SIDEBAR_COLLAPSE_KEY, collapsed ? '1' : '0'); } catch (e) {}
+  const btn = document.getElementById('sidebar-collapse-btn');
+  if (btn) btn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+}
+
+function applySavedSidebarCollapseState() {
+  let wasCollapsed = false;
+  try { wasCollapsed = localStorage.getItem(SIDEBAR_COLLAPSE_KEY) === '1'; } catch (e) {}
+  if (!wasCollapsed) return;
+  const sidebar = document.querySelector('.sidebar');
+  if (!sidebar) return;
+  sidebar.classList.add('collapsed');
+  document.body.classList.add('sidebar-collapsed');
+  const btn = document.getElementById('sidebar-collapse-btn');
+  if (btn) btn.title = 'Expand sidebar';
+}
+document.addEventListener('DOMContentLoaded', applySavedSidebarCollapseState);
+
+// Auto-close sidebar on nav item click for mobile
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      if (window.innerWidth <= 991) closeSidebarMobile();
+    });
+  });
+  // Close on Escape
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeSidebarMobile();
+  });
+  // Swipe-left to close sidebar
+  let _touchStartX = 0;
+  document.addEventListener('touchstart', e => { _touchStartX = e.touches[0].clientX; }, { passive: true });
+  document.addEventListener('touchend', e => {
+    const dx = _touchStartX - e.changedTouches[0].clientX;
+    if (dx > 60 && document.querySelector('.sidebar')?.classList.contains('mobile-open')) {
+      closeSidebarMobile();
+    }
+  }, { passive: true });
+});
+
+
+let _pendingProductImport = [];
+let _pendingCustomerImport = [];
+let _productImportExistingMap = {}; // sku(lowercased) -> existing product record from backend
+let _customerImportExistingMap = {}; // phone -> existing customer record from backend
+
+function triggerProductImport() { document.getElementById('product-import-file').click(); }
+function triggerCustomerImport() { document.getElementById('customer-import-file').click(); }
+
+// Normalizes a parsed row's keys to bare-alphanumeric-lowercase (so "Buy Price",
+// "buy_price", "BuyPrice" all become "buyprice") so column matching doesn't
+// depend on the exact header wording/spacing the user's sheet happens to use.
+// Uses the exact same column headers the importer already recognizes
+// (Product Name, SKU Code, etc.) so exporting your current catalog, editing
+// it in Excel, and re-importing it always round-trips correctly. With no
+// products yet, this still downloads a header-only file — the blank
+// template format the import expects.
+async function exportProducts() {
+  let products = [];
+  try {
+    const data = await ProductsAPI.list({ page_size: 5000 });
+    products = data.results || data;
+  } catch (err) {
+    toast('Failed to load products for export: ' + (err.message || 'server error'), 'error');
+    return;
+  }
+
+  const rows = products.map(p => ({
+    'Product Name': p.name,
+    'SKU Code': p.sku,
+    'Category': p.category_name || '',
+    'Brand': p.brand_name || '',
+    'Purchase Price ($)': Number(p.cost_price ?? 0),
+    'Base Selling Price ($)': Number(p.selling_price ?? 0),
+    'Discount (%)': Number(p.discount_percent ?? 0),
+    'Tax / GST (%)': Number(p.tax_rate ?? 0),
+    'Stock Quantity': Number(p.current_stock ?? 0),
+    'Min Stock Level': Number(p.reorder_level ?? 10),
+    'Barcode': p.barcode || '',
+    'Product Emoji Icon': '',
+  }));
+
+  const headerOrder = ['Product Name','SKU Code','Category','Brand','Purchase Price ($)',
+    'Base Selling Price ($)','Discount (%)','Tax / GST (%)','Stock Quantity','Min Stock Level',
+    'Barcode','Product Emoji Icon'];
+
+  const ws = XLSX.utils.json_to_sheet(rows, { header: headerOrder });
+  ws['!cols'] = headerOrder.map(h => ({ wch: Math.max(14, h.length + 2) }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Products');
+
+  const filename = products.length ? `products_export_${new Date().toISOString().split('T')[0]}.xlsx` : 'products_import_template.xlsx';
+  XLSX.writeFile(wb, filename);
+  toast(products.length ? `Exported ${products.length} product(s)` : 'Downloaded blank import template', 'success');
+}
+
+function _normalizeImportRow(row) {
+  const out = {};
+  Object.keys(row).forEach(k => {
+    const nk = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+    out[nk] = row[k];
+  });
+  return out;
+}
+
+// Returns the value of the first alias key actually present in the
+// normalized row (checked with hasOwnProperty so a legitimate "0" isn't
+// treated as missing), or '' if none of the aliases were found.
+function _pick(nrow, aliases) {
+  for (const a of aliases) {
+    if (Object.prototype.hasOwnProperty.call(nrow, a)) return nrow[a];
+  }
+  return '';
+}
+
+function parseCSV(text) {
+  const lines = text.trim().split('\n');
+  if (!lines.length) return [];
+  const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, '').toLowerCase());
+  return lines.slice(1).filter(l=>l.trim()).map(line => {
+    const vals = [];
+    let cur = ''; let inQ = false;
+    for (let i=0; i<line.length; i++) {
+      if (line[i]==='"') { inQ=!inQ; continue; }
+      if (line[i]===',' && !inQ) { vals.push(cur.trim()); cur=''; continue; }
+      cur += line[i];
+    }
+    vals.push(cur.trim());
+    const obj = {};
+    headers.forEach((h,i) => { obj[h] = vals[i]||''; });
+    return obj;
+  });
+}
+
+function handleProductImport(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+  const reader = new FileReader();
+  reader.onload = async e => {
+    let rows = [];
+    if (file.name.endsWith('.csv')) {
+      rows = parseCSV(e.target.result);
+    } else if (isExcel) {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const jsonData = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+        rows = jsonData.map(r => {
+          const lower = {};
+          Object.keys(r).forEach(k => { lower[k.trim().toLowerCase()] = String(r[k]); });
+          return lower;
+        });
+      } catch(err) {
+        toast('Failed to read Excel file. Please check the file and try again.', 'error');
+        input.value=''; return;
+      }
+    } else {
+      toast('Unsupported file type. Please upload .csv, .xlsx or .xls', 'warning');
+      input.value=''; return;
+    }
+    _pendingProductImport = rows.map(r => {
+      const n = _normalizeImportRow(r);
+      return {
+        name: _pick(n, ['name','productname','itemname','title']),
+        sku: _pick(n, ['sku','skucode','productcode','itemcode']),
+        category: _pick(n, ['category','categoryname','cat']),
+        brand: _pick(n, ['brand','brandname','manufacturer']),
+        buyPrice: parseFloat(_pick(n, ['buyprice','cost','costprice','purchaseprice']) || 0),
+        sellPrice: parseFloat(_pick(n, ['sellprice','price','sellingprice','saleprice','basesellingprice']) || 0),
+        stock: parseInt(_pick(n, ['stock','quantity','qty','stockquantity']) || 0),
+        minStock: parseInt(_pick(n, ['minstock','reorderlevel','minimumstock','minstocklevel']) || 10),
+        barcode: _pick(n, ['barcode']),
+        piecesPerCarton: parseInt(_pick(n, ['piecespercarton','ppc','unitspercarton']) || 1),
+        cartonQty: parseInt(_pick(n, ['cartonqty','cartons']) || 0),
+        icon: _pick(n, ['icon']) || '📦',
+        expiry: _pick(n, ['expiry','expirydate','expdate']),
+      };
+    }).filter(r => r.name && r.sku);
+
+    // Pull the REAL product list from the backend so we know which SKUs
+    // already exist (previously this checked a hardcoded demo array that
+    // was never connected to the database, so "Update" vs "New" was wrong
+    // and confirming the import didn't save anything at all).
+    _productImportExistingMap = {};
+    try {
+      const existingData = await ProductsAPI.list({ page_size: 2000 });
+      (existingData.results || existingData).forEach(p => {
+        if (p.sku) _productImportExistingMap[p.sku.trim().toLowerCase()] = p;
+      });
+    } catch (err) {
+      toast('Could not check existing products: ' + (err.message || 'server error'), 'error');
+    }
+
+    // Build preview table
+    const valid = _pendingProductImport;
+    const previewHTML = `<table>
+      <thead><tr><th>Name</th><th>SKU</th><th>Category</th><th>Buy</th><th>Sell</th><th>Stock</th><th>Pcs/Ctn</th><th>Status</th></tr></thead>
+      <tbody>${valid.map(r => {
+        const existing = _productImportExistingMap[r.sku.trim().toLowerCase()];
+        return `<tr>
+          <td>${r.icon} ${r.name}</td>
+          <td class="td-mono">${r.sku}</td>
+          <td>${r.category}</td>
+          <td>Rs.${r.buyPrice.toFixed(2)}</td>
+          <td>Rs.${r.sellPrice.toFixed(2)}</td>
+          <td>${r.stock}</td>
+          <td>${r.piecesPerCarton > 1 ? r.piecesPerCarton : '—'}</td>
+          <td><span class="badge ${existing?'badge-yellow':'badge-green'}">${existing?'Update':'New'}</span></td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>`;
+    document.getElementById('product-import-preview').innerHTML = previewHTML;
+    const newCount = valid.filter(r => !_productImportExistingMap[r.sku.trim().toLowerCase()]).length;
+    const updateCount = valid.length - newCount;
+    document.getElementById('product-import-stats').innerHTML =
+      `<span class="badge badge-green" style="margin-right:6px">✅ ${newCount} New</span><span class="badge badge-yellow">${updateCount} Updates</span><span style="font-size:11px;color:var(--text-muted);margin-left:8px">${rows.length - valid.length} rows skipped (missing name/sku)</span>`;
+    openModal('product-import-modal');
+    input.value = '';
+  };
+  if (isExcel) { reader.readAsArrayBuffer(file); } else { reader.readAsText(file); }
+}
+
+async function confirmProductImport() {
+  const rows = _pendingProductImport;
+  closeModal('product-import-modal');
+  if (!rows.length) return;
+  toast(`Importing ${rows.length} product(s)…`, 'success');
+
+  // Category/brand names still need resolving to IDs first (fast — usually
+  // only a handful of distinct categories/brands, and results are cached),
+  // but the actual product rows are now sent to the backend in ONE request
+  // instead of one HTTP call per row. That used to mean 100 products = 100
+  // separate round-trips (slow, and any single one failing was easy to miss
+  // in the noise) — now it's a single request the backend saves in bulk.
+  let warehouseId = null;
+  if (rows.some(r => r.stock > 0)) {
+    try { warehouseId = await _ensureDefaultWarehouse(); } catch (err) { /* handled per-row below */ }
+  }
+
+  const items = [];
+  const prepFailReasons = [];
+  for (const r of rows) {
+    try {
+      const categoryId = await _findOrCreateCategory(r.category);
+      const brandId = await _findOrCreateBrand(r.brand);
+      const payload = {
+        name: r.name,
+        sku: r.sku,
+        category: categoryId,
+        brand: brandId,
+        cost_price: r.buyPrice || 0,
+        selling_price: r.sellPrice || 0,
+        reorder_level: r.minStock || 10,
+      };
+      if (r.barcode) payload.barcode = r.barcode;
+      if (r.stock > 0 && warehouseId) {
+        payload.initial_stock = r.stock;
+        payload.warehouse = warehouseId;
+      }
+      items.push(payload);
+    } catch (err) {
+      prepFailReasons.push(`${r.sku || '(no sku)'} — ${err.message || 'could not resolve category/brand'}`);
+    }
+  }
+
+  let added = 0, updated = 0, failed = prepFailReasons.length;
+  const failReasons = [...prepFailReasons];
+  if (items.length) {
+    try {
+      const result = await ProductsAPI.bulkCreate(items);
+      added = result.created_count || 0;
+      updated = result.updated_count || 0;
+      failed += result.error_count || 0;
+      (result.errors || []).forEach(e => {
+        const reason = (e.error && JSON.stringify(e.error)) || 'unknown error';
+        failReasons.push(`${e.row?.sku || '(no sku)'} — ${reason}`);
+      });
+    } catch (err) {
+      failed += items.length;
+      failReasons.push(`Bulk import request failed — ${err.message || 'server error'}`);
+    }
+  }
+
+  // Clear any leftover search text or category filter before refreshing —
+  // otherwise a filter left over from browsing (e.g. a category selected,
+  // or a search term typed) can hide every newly-imported product even
+  // though they were saved successfully, making it look like the import
+  // "didn't work" when it actually did.
+  const searchBox = document.getElementById('prod-search');
+  const catFilter = document.getElementById('prod-cat-filter');
+  if (searchBox) searchBox.value = '';
+  if (catFilter) catFilter.value = '';
+
+  await renderProducts();
+  toast(`Import done: ${added} added, ${updated} updated${failed ? `, ${failed} failed` : ''}`, failed ? 'warning' : 'success');
+  if (failReasons.length) {
+    console.warn('Product import — rows that failed:\n' + failReasons.join('\n'));
+    const shown = failReasons.slice(0, 8).join('\n');
+    alert(`${failed} row(s) failed to import:\n\n${shown}${failReasons.length > 8 ? `\n…and ${failReasons.length - 8} more (see browser console for the full list)` : ''}`);
+  }
+  _pendingProductImport = [];
+  _productImportExistingMap = {};
+}
+
+function handleCustomerImport(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const isExcelC = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+  const reader = new FileReader();
+  reader.onload = async e => {
+    let rows = [];
+    if (file.name.endsWith('.csv')) {
+      rows = parseCSV(e.target.result);
+    } else if (isExcelC) {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const jsonData = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+        rows = jsonData.map(r => {
+          const lower = {};
+          Object.keys(r).forEach(k => { lower[k.trim().toLowerCase()] = String(r[k]); });
+          return lower;
+        });
+      } catch(err) {
+        toast('Failed to read Excel file. Please check the file and try again.', 'error');
+        input.value=''; return;
+      }
+    } else {
+      toast('Unsupported file type. Please upload .csv, .xlsx or .xls', 'warning');
+      input.value=''; return;
+    }
+    _pendingCustomerImport = rows.map(r => {
+      const n = _normalizeImportRow(r);
+      return {
+        name: _pick(n, ['name','fullname','customername','shopkeepername']),
+        phone: _pick(n, ['phone','mobile','contact','phonenumber','mobilenumber']),
+        email: _pick(n, ['email','emailaddress']),
+        address: _pick(n, ['address','fulladdress','homeaddress','location']),
+        cnic: _pick(n, ['cnic','nic','nationalid','idcard','cnicnumber','cnicno']),
+        loyaltyPoints: parseInt(_pick(n, ['loyaltypoints','points']) || 0),
+      };
+    }).filter(r => r.name);
+
+    // Every row becomes a NEW customer — shop/customer names repeating is
+    // fine and expected. Phone and CNIC are the only two fields that could
+    // clash with an existing record or another row in the same sheet, so if
+    // either value is already taken, we clear just that one field for this
+    // row and still import everything else (name, address, email, points).
+    // Nothing gets skipped or silently merged into another customer.
+    const existingPhones = new Set();
+    const existingCnics = new Set();
+    try {
+      const existingData = await CustomersAPI.list({ page_size: 2000 });
+      (existingData.results || existingData).forEach(c => {
+        if (c.phone) existingPhones.add(c.phone.trim());
+        if (c.cnic) existingCnics.add(c.cnic.trim());
+      });
+    } catch (err) {
+      toast('Could not check existing customers: ' + (err.message || 'server error'), 'error');
+    }
+    const seenPhones = new Set(existingPhones);
+    const seenCnics = new Set(existingCnics);
+    _pendingCustomerImport.forEach(r => {
+      if (r.phone) {
+        const p = r.phone.trim();
+        if (seenPhones.has(p)) { r.phone = ''; r._dupPhone = true; } else seenPhones.add(p);
+      }
+      if (r.cnic) {
+        const c = r.cnic.trim();
+        if (seenCnics.has(c)) { r.cnic = ''; r._dupCnic = true; } else seenCnics.add(c);
+      }
+    });
+
+    const valid = _pendingCustomerImport;
+    const previewHTML = `<table>
+      <thead><tr><th>Name</th><th>Phone</th><th>CNIC</th><th>Email</th><th>Address</th><th>Points</th><th>Note</th></tr></thead>
+      <tbody>${valid.map(r => {
+        const note = (r._dupPhone || r._dupCnic)
+          ? `<span class="badge badge-yellow">duplicate ${[r._dupPhone&&'phone',r._dupCnic&&'CNIC'].filter(Boolean).join('/')} cleared</span>`
+          : `<span class="badge badge-green">New</span>`;
+        return `<tr>
+          <td class="fw-700">${r.name}</td>
+          <td>${r.phone||'—'}</td>
+          <td class="td-mono">${r.cnic||'—'}</td>
+          <td>${r.email||'—'}</td>
+          <td style="font-size:11px">${r.address||'—'}</td>
+          <td>${r.loyaltyPoints}</td>
+          <td>${note}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>`;
+    document.getElementById('customer-import-preview').innerHTML = previewHTML;
+    const dupCount = valid.filter(r => r._dupPhone || r._dupCnic).length;
+    document.getElementById('customer-import-stats').innerHTML =
+      `<span class="badge badge-green" style="margin-right:6px">✅ ${valid.length} will be added</span>${dupCount ? `<span class="badge badge-yellow">${dupCount} with duplicate phone/CNIC cleared</span>` : ''}<span style="font-size:11px;color:var(--text-muted);margin-left:8px">${rows.length - valid.length} rows skipped (missing name)</span>`;
+    openModal('customer-import-modal');
+    input.value = '';
+  };
+  if (isExcelC) { reader.readAsArrayBuffer(file); } else { reader.readAsText(file); }
+}
+
+async function confirmCustomerImport() {
+  const rows = _pendingCustomerImport;
+  closeModal('customer-import-modal');
+  if (!rows.length) return;
+  toast(`Importing ${rows.length} customer(s)…`, 'success');
+
+  // All rows go to the backend in ONE request now instead of one HTTP call
+  // per customer — 100 customers used to mean 100 separate round-trips.
+  const items = rows.map(r => ({
+    name: r.name,
+    phone: r.phone || '',
+    email: r.email || '',
+    address: r.address || '',
+    cnic: r.cnic || '',
+    loyalty_points: r.loyaltyPoints || 0,
+  }));
+
+  let added = 0, failed = 0;
+  const failReasons = [];
+  try {
+    const result = await CustomersAPI.bulkCreate(items);
+    added = result.created_count || 0;
+    failed = result.error_count || 0;
+    (result.errors || []).forEach(e => {
+      const reason = (e.error && JSON.stringify(e.error)) || 'unknown error';
+      failReasons.push(`${e.row?.name || '(no name)'} — ${reason}`);
+    });
+  } catch (err) {
+    failed = items.length;
+    failReasons.push(`Bulk import request failed — ${err.message || 'server error'}`);
+  }
+
+  await renderCustomers();
+  if (typeof updatePosCustomers === 'function') await updatePosCustomers();
+  toast(`Import done: ${added} added${failed ? `, ${failed} failed` : ''}`, failed ? 'warning' : 'success');
+  if (failReasons.length) {
+    console.warn('Customer import — rows that failed:\n' + failReasons.join('\n'));
+    const shown = failReasons.slice(0, 8).join('\n');
+    alert(`${failed} row(s) failed to import:\n\n${shown}${failReasons.length > 8 ? `\n…and ${failReasons.length - 8} more (see browser console for the full list)` : ''}`);
+  }
+  _pendingCustomerImport = [];
+}
+
+// ═══════════════════════════════════════════════════════
+// V2: SALE SLIP SETTINGS + TAX DISPLAY + COLLECTION BY USERNAME
+// ═══════════════════════════════════════════════════════
+
+// ── Sale Slip Settings ─────────────────────────────────
+const SS_SETTINGS_KEY = 'smartretail_ss_settings_v2';
+const SS_SETTINGS_DEFAULTS = {
+  showTax: true, showTaxAmount: true, showDiscount: true, showCartonPrice: true,
+  showSubtotal: true, showCustomerDetails: true, showProfit: false,
+  showCompanyLogo: true, showFooterNotes: true, showBookedBy: true,
+  showPaymentMethod: true,
+  // 1 = the slip's original text size. Bumped to 1.15 by default now (was
+  // always 1 before) since the base template's print text ran small —
+  // this is the "manual, no-code-editing" control for it going forward:
+  // change it here any time instead of hunting through buildSlipA4Html's
+  // hardcoded px values.
+  fontScale: 1.15,
+  // Separate control that ONLY bumps the "Product Name" column text in
+  // the items table — independent of fontScale above, which scales the
+  // whole slip (logo, totals, header, everything). 1 = original 9.5px.
+  productNameFontScale: 1,
+};
+let ssSettings = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SS_SETTINGS_KEY));
+    // Merge over defaults (not replace) so a NEW toggle we add later still
+    // gets a sensible default for people who already saved settings before
+    // that toggle existed, instead of silently coming out as "off".
+    return saved ? { ...SS_SETTINGS_DEFAULTS, ...saved } : null;
+  } catch(e) { return null; }
+})() || { ...SS_SETTINGS_DEFAULTS };
+
+function saveSsSettings() {
+  document.querySelectorAll('.ss-setting-check').forEach(cb => {
+    ssSettings[cb.dataset.key] = cb.checked;
+  });
+  const fontScaleEl = document.getElementById('ss-font-scale');
+  if (fontScaleEl) ssSettings.fontScale = parseFloat(fontScaleEl.value) || 1;
+  const productNameFontScaleEl = document.getElementById('ss-product-name-font-scale');
+  if (productNameFontScaleEl) ssSettings.productNameFontScale = parseFloat(productNameFontScaleEl.value) || 1;
+  localStorage.setItem(SS_SETTINGS_KEY, JSON.stringify(ssSettings));
+  closeModal('ss-settings-modal');
+  toast('Sale Slip settings saved!', 'success');
+}
+
+// Universal toggle row builder (used by SS Settings modal)
+function makeSettingToggle(key, label, icon, val) {
+  return `<label style="display:flex;align-items:center;justify-content:space-between;padding:11px 14px;background:var(--bg-secondary);border-radius:8px;cursor:pointer;border:1px solid var(--border);transition:border-color .15s;gap:8px"
+    onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+    <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
+      <div style="width:30px;height:30px;flex-shrink:0;border-radius:6px;background:var(--accent-glow);display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:12px"><i class="fa ${icon}"></i></div>
+      <span style="font-size:13px;font-weight:600">${label}</span>
+    </div>
+    <div style="position:relative;width:42px;height:24px;flex-shrink:0" onclick="event.preventDefault();ssToggle('${key}',this)">
+      <div class="ss-toggle-bg" style="position:absolute;inset:0;border-radius:12px;background:${val?'var(--accent)':'var(--border)'};transition:background .2s;cursor:pointer"></div>
+      <div class="ss-toggle-dot" style="position:absolute;top:2px;left:${val?'20px':'2px'};width:20px;height:20px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.35);pointer-events:none"></div>
+      <input type="checkbox" class="ss-setting-check" data-key="${key}" ${val?'checked':''} style="opacity:0;width:0;height:0;position:absolute;pointer-events:none">
+    </div>
+  </label>`;
+}
+
+// Live toggle for SS Settings modal
+function ssToggle(key, container) {
+  const cb  = container.querySelector('.ss-setting-check');
+  const bg  = container.querySelector('.ss-toggle-bg');
+  const dot = container.querySelector('.ss-toggle-dot');
+  if (!cb) return;
+  cb.checked = !cb.checked;
+  if (bg)  bg.style.background = cb.checked ? 'var(--accent)' : 'var(--border)';
+  if (dot) dot.style.left      = cb.checked ? '20px' : '2px';
+}
+
+// ── Sale Slips "Print Summary Sheet" Settings ─────────
+// A separate settings set from Order Summary — that one's a per-PRODUCT
+// dispatch table (SKU/Cartons/etc.), this is a per-INVOICE listing
+// (Customer/Account/Bill Amt/Payment/etc.), so it needs its own column set.
+const SSS_SETTINGS_KEY = 'smartretail_sss_settings';
+let sssSettings = (() => {
+  try { return JSON.parse(localStorage.getItem(SSS_SETTINGS_KEY)); } catch(e) { return null; }
+})() || {
+  showAccountNo: true, showItems: true, showBillAmt: true,
+  showPrevBalance: true, showNetPayable: true, showPaymentMethod: true,
+};
+
+function makeSssSettingToggle(key, label, icon, val) {
+  return `<label style="display:flex;align-items:center;justify-content:space-between;padding:11px 14px;background:var(--bg-secondary);border-radius:8px;cursor:pointer;border:1px solid var(--border);transition:border-color .15s;gap:8px"
+    onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+    <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
+      <div style="width:30px;height:30px;flex-shrink:0;border-radius:6px;background:var(--accent-glow);display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:12px"><i class="fa ${icon}"></i></div>
+      <span style="font-size:13px;font-weight:600">${label}</span>
+    </div>
+    <div style="position:relative;width:42px;height:24px;flex-shrink:0" onclick="event.preventDefault();sssToggle('${key}',this)">
+      <div class="sss-toggle-bg" style="position:absolute;inset:0;border-radius:12px;background:${val?'var(--accent)':'var(--border)'};transition:background .2s;cursor:pointer"></div>
+      <div class="sss-toggle-dot" style="position:absolute;top:2px;left:${val?'20px':'2px'};width:20px;height:20px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.35);pointer-events:none"></div>
+      <input type="checkbox" class="sss-setting-check" data-key="${key}" ${val?'checked':''} style="opacity:0;width:0;height:0;position:absolute;pointer-events:none">
+    </div>
+  </label>`;
+}
+
+function sssToggle(key, container) {
+  const cb  = container.querySelector('.sss-setting-check');
+  const bg  = container.querySelector('.sss-toggle-bg');
+  const dot = container.querySelector('.sss-toggle-dot');
+  if (!cb) return;
+  cb.checked = !cb.checked;
+  if (bg)  bg.style.background = cb.checked ? 'var(--accent)' : 'var(--border)';
+  if (dot) dot.style.left      = cb.checked ? '20px' : '2px';
+}
+
+function saveSssSettings() {
+  document.querySelectorAll('.sss-setting-check').forEach(cb => {
+    sssSettings[cb.dataset.key] = cb.checked;
+  });
+  localStorage.setItem(SSS_SETTINGS_KEY, JSON.stringify(sssSettings));
+  closeModal('sss-settings-modal');
+  toast('Summary Sheet settings saved!', 'success');
+}
+
+// A slip's "effective" day: the Booking Date typed on the booking form (saved
+// in notes as "(date: YYYY-MM-DD)") when present, otherwise the day it was
+// created in the user's LOCAL time zone (created_at is UTC).
+function _ssEffectiveDay(b) {
+  const m = /\(date:\s*(\d{4}-\d{2}-\d{2})\)\s*$/.exec(String(b.notes || ''));
+  if (m) return m[1];
+  const d = new Date(b.created_at);
+  if (isNaN(d)) return '';
+  const p2 = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}`;
+}
+
+// Date-range + time-of-day match. dFrom / dTo are YYYY-MM-DD; either may be
+// blank (= no limit on that side). Time-of-day uses the creation time (local).
+function _ssMatchDateTime(b, dFrom, dTo, tFrom, tTo) {
+  if (!dFrom && !dTo && !tFrom && !tTo) return true;
+  const day = _ssEffectiveDay(b);
+  if ((dFrom || dTo) && !day) return false;
+  if (dFrom && day < dFrom) return false;
+  if (dTo && day > dTo) return false;
+  if (tFrom || tTo) {
+    const d = new Date(b.created_at);
+    if (isNaN(d)) return false;
+    const p2 = n => String(n).padStart(2, '0');
+    const hm = `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+    if (tFrom && hm < tFrom) return false;
+    if (tTo && hm > tTo) return false;
+  }
+  return true;
+}
+
+// Loads slips from the server for the chosen From/To date range. The old code
+// only ever fetched the newest 200 invoices, so anything older than that
+// (e.g. last month) never reached the screen. With a date range we ask the
+// server for exactly that range and walk through every page of it.
+let _slipsRangeKey = null;
+async function _ssFetchSlips(dFrom, dTo) {
+  const params = { ordering: '-created_at' };
+  const startLocal = d => { const [y,m,dd] = d.split('-').map(Number); return new Date(y, m-1, dd, 0, 0, 0, 0); };
+  const endLocal   = d => { const [y,m,dd] = d.split('-').map(Number); return new Date(y, m-1, dd, 23, 59, 59, 999); };
+  if (dFrom) { params.date_from = dFrom; params.created_after  = startLocal(dFrom).toISOString(); }
+  if (dTo)   { params.date_to   = dTo;   params.created_before = endLocal(dTo).toISOString(); }
+
+  // No dates chosen → just the latest slips (fast default).
+  if (!dFrom && !dTo) {
+    const data = await SalesAPI.list({ ...params, page_size: 200 });
+    return data.results || data;
+  }
+  let all = [];
+  for (let page = 1; page <= 50; page++) {
+    const data = await SalesAPI.list({ ...params, page_size: 500, page });
+    const rows = data.results || data;
+    all = all.concat(rows);
+    if (!data.next || !rows.length) break;
+  }
+  return all;
+}
+
+// ── SALES SLIP SEARCH with username/invoice/area filter ──
+window.renderSaleSlips = async function(forceRefresh) {
+  const dateFrom       = document.getElementById('ss-date-from')?.value||'';
+  const dateTo         = document.getElementById('ss-date-to')?.value||'';
+  const timeFromF      = document.getElementById('ss-time-from')?.value||'';
+  const timeToF        = document.getElementById('ss-time-to')?.value||'';
+  const statusFilter   = document.getElementById('ss-status')?.value||'';
+  const nameFilter     = (document.getElementById('ss-name')?.value||'').toLowerCase().trim();
+  const invoiceFilter  = (document.getElementById('ss-invoice')?.value||'').toLowerCase().trim();
+  const usernameFilter = (document.getElementById('ss-username')?.value||'').toLowerCase().trim();
+  const areaFilter     = (document.getElementById('ss-area')?.value||'').toLowerCase().trim();
+
+  // Fetch from the server only once per page visit (or when explicitly
+  // refreshed, e.g. after saving a new sale) — every filter change after
+  // that runs instantly against the cached list instead of round-tripping
+  // to the backend on every keystroke.
+  const rangeKey = dateFrom + '|' + dateTo;
+  if (!_slipsLoaded || forceRefresh === true || rangeKey !== _slipsRangeKey) {
+    try {
+      _slipsCache = await _ssFetchSlips(dateFrom, dateTo);
+      _slipsRangeKey = rangeKey;
+      _slipsLoaded = true;
+    } catch (e) { console.error(e); toast('Could not load sale slips','error'); return; }
+  }
+
+  const slips = _slipsCache.filter(b =>
+    !_isPosTerminalSale(b) &&   // POS Terminal bills live under POS Terminal → POS Bills
+    (statusFilter ? b.status === statusFilter : b.status !== 'cancelled') &&
+    _ssMatchDateTime(b, dateFrom, dateTo, timeFromF, timeToF) &&
+    (!nameFilter     || (b.customer_name||'').toLowerCase().includes(nameFilter)) &&
+    (!invoiceFilter  || (b.invoice_number||'').toLowerCase().includes(invoiceFilter) ||
+                        accNo(b.customer||'', b.customer_account_no).toLowerCase().includes(invoiceFilter)) &&
+    (!usernameFilter || (b.served_by_name||'').toLowerCase().includes(usernameFilter)) &&
+    (!areaFilter     || (b.customer_address||'').toLowerCase().includes(areaFilter))
+  );
+
+  const tbody = document.getElementById('saleslips-tbody');
+  const label = document.getElementById('ss-count-label');
+  if (!tbody) return;
+  if (label) label.textContent = slips.length + ' slip' + (slips.length!==1?'s':'');
+
+  if (!slips.length) {
+    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-file-invoice" style="font-size:32px;display:block;margin-bottom:10px;opacity:0.3"></i>No sale slips found</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = slips.map(b => {
+    const statusClass = b.status === 'completed' ? 'badge-green'
+      : b.status === 'edited' ? 'badge-blue'
+      : ['returned','partially_returned'].includes(b.status) ? 'badge-red' : 'badge-yellow';
+    const hasTax  = Number(b.tax_amount) > 0;
+    const hasDisc = Number(b.discount_amount) > 0;
+    return `<tr>
+      <td class="td-mono" data-label="Invoice" style="font-weight:700">${b.invoice_number}</td>
+      <td data-label="Date" style="font-size:12px">${_ssEffectiveDay(b)}</td>
+      <td data-label="Customer" style="font-weight:600">${b.customer_name||'Walk-in'}
+        ${b.served_by_name ? `<div style="font-size:10px;color:var(--text-muted)"><i class="fa fa-user-tag"></i> ${b.served_by_name}</div>` : ''}
+      </td>
+      <td class="td-mono" data-label="Account">${b.customer?(accNo(b.customer, b.customer_account_no)):'—'}</td>
+      <td data-label="Items" style="text-align:center">${b.items?.length||0}</td>
+      <td class="fw-700 td-mono" data-label="Amount">Rs.${Number(b.subtotal).toFixed(2)}
+        ${hasTax ? `<div style="font-size:10px;color:var(--yellow)">+Rs.${Number(b.tax_amount).toFixed(2)} tax</div>` : ''}
+        ${hasDisc ? `<div style="font-size:10px;color:var(--green)">-Rs.${Number(b.discount_amount).toFixed(2)} disc</div>` : ''}
+      </td>
+      <td class="fw-700 td-mono" data-label="Net Payable" style="color:var(--yellow)">Rs.${Number(b.total_amount).toFixed(2)}</td>
+      <td data-label="Status"><span class="badge ${statusClass}">${b.status.replace(/_/g,' ')}</span></td>
+      <td class="m-actions">
+        <div style="display:flex;gap:4px;flex-wrap:nowrap">
+          <button class="btn btn-ghost btn-xs" onclick="viewSlipDetail(${b.id})" title="View Details"><i class="fa fa-eye"></i></button>
+          <button class="btn btn-ghost btn-xs" onclick="printSingleSlipA4(${b.id})" title="Print"><i class="fa fa-print"></i></button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+};
+
+// clearSaleSlipsFilters is defined once, further below.
+
+// Fixed: previously overrode viewSlipDetail with a call to a non-existent
+// viewOrderDetail() function (dead code from the original template — would
+// have thrown ReferenceError on click). The real viewSlipDetail defined
+// earlier (using _slipsCache) is left as the only definition.
+window.downloadSlipInvoice = async function(id) {
+  let b = _slipsCache.find(x => x.id === id);
+  if (!b) b = await SalesAPI.get(id);
+  if (!b) { toast('Booking not found','error'); return; }
+  const html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Invoice ' + b.invoice_number + '</title></head><body style="margin:0;padding:20px;font-family:sans-serif">' + buildSlipA4Html(b) + '</body></html>';
+  const blob = new Blob([html], { type: 'text/html' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'Invoice-' + b.invoice_number + '.html'; a.click();
+  URL.revokeObjectURL(a.href);
+  toast('Invoice downloaded!', 'success');
+};
+
+// ── Order Summary Settings (extended with fin-KPI toggles) ──
+const OS_SETTINGS_KEY = 'smartretail_os_settings';
+let osSettings = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(OS_SETTINGS_KEY));
+    // Merge with defaults so new keys are always present
+    return Object.assign({
+      showSku: true, showOrders: true, showPieces: true, showPcsPerCtn: true,
+      showCartonsOut: true, showLoosePcs: true, showUnitCost: true, showTotalCost: true,
+      // Financial KPI strip toggles
+      finShowOrders: true, finShowAmount: true, finShowTax: true,
+      finShowDiscount: true, finShowPending: true, finShowReceived: true,
+    }, saved || {});
+  } catch(e) { return null; }
+})() || {
+  showSku: true, showOrders: true, showPieces: true, showPcsPerCtn: true,
+  showCartonsOut: true, showLoosePcs: true, showUnitCost: true, showTotalCost: true,
+  finShowOrders: true, finShowAmount: true, finShowTax: true,
+  finShowDiscount: true, finShowPending: true, finShowReceived: true,
+};
+
+function saveOsSettings() {
+  document.querySelectorAll('.os-setting-check').forEach(cb => {
+    osSettings[cb.dataset.key] = cb.checked;
+  });
+  localStorage.setItem(OS_SETTINGS_KEY, JSON.stringify(osSettings));
+  closeModal('os-settings-modal');
+  applyOsFinKpiVisibility();
+  applyOsColumnVisibility();
+  renderOrderSummary();
+  toast('Order Summary settings saved!', 'success');
+}
+
+// Live toggle handler — flips the dot and background instantly
+function osToggle(key, container) {
+  const cb  = container.querySelector('.os-setting-check');
+  const bg  = container.querySelector('.os-toggle-bg');
+  const dot = container.querySelector('.os-toggle-dot');
+  if (!cb) return;
+  cb.checked = !cb.checked;
+  if (bg)  bg.style.background = cb.checked ? 'var(--accent)' : 'var(--border)';
+  if (dot) dot.style.left      = cb.checked ? '20px' : '2px';
+}
+
+// Apply fin-KPI card visibility based on settings
+function applyOsFinKpiVisibility() {
+  const map = {
+    finShowOrders:   'os-fin-card-orders',
+    finShowAmount:   'os-fin-card-amount',
+    finShowTax:      'os-fin-card-tax',
+    finShowDiscount: 'os-fin-card-discount',
+    finShowPending:  'os-fin-card-pending',
+    finShowReceived: 'os-fin-card-received',
+  };
+  Object.entries(map).forEach(([key, elId]) => {
+    const el = document.getElementById(elId);
+    if (el) el.style.display = osSettings[key] === false ? 'none' : '';
+  });
+}
+
+// Hides/shows Dispatch Table columns based on osSettings. Column indexes
+// (1-based, matching <th>/<td> position in #os-main-table) — index 1 is
+// "Product" and is always visible.
+const OS_COLUMN_MAP = {
+  showSku:        2, // SKU
+  showOrders:     3, // Orders
+  showPieces:     4, // Total Pieces
+  showPcsPerCtn:  5, // Pcs / Ctn
+  showCartonsOut: 6, // Cartons Out
+  showLoosePcs:   7, // Loose Pcs
+  showUnitCost:   8, // Unit Cost
+  showTotalCost:  9, // Total Cost
+};
+function applyOsColumnVisibility() {
+  const table = document.getElementById('os-main-table');
+  if (!table) return;
+  Object.entries(OS_COLUMN_MAP).forEach(([key, colIndex]) => {
+    const visible = osSettings[key] !== false;
+    table.querySelectorAll(`th:nth-child(${colIndex}), td:nth-child(${colIndex})`)
+      .forEach(cell => { cell.style.display = visible ? '' : 'none'; });
+  });
+}
+
+// ── Product pricing auto-calculator ───────────────────
+function calcProdPricing() {
+  const buy    = parseFloat(document.getElementById('prod-buy')?.value) || 0;
+  const sell   = parseFloat(document.getElementById('prod-sell')?.value) || 0;
+  const discPct = parseFloat(document.getElementById('prod-discount')?.value) || 0;
+  const taxPct  = parseFloat(document.getElementById('prod-tax')?.value) || 0;
+  const summary = document.getElementById('prod-pricing-summary');
+  if (!summary) return;
+  if (sell > 0 || buy > 0) {
+    summary.style.display = '';
+    const discAmt   = sell * discPct / 100;
+    const finalSell = sell - discAmt;
+    const taxIncl   = finalSell * (1 + taxPct / 100);
+    const profit    = finalSell - buy;
+    const margin    = buy > 0 ? (profit / buy * 100) : 0;
+    document.getElementById('prod-calc-disc').textContent   = 'Rs.' + discAmt.toFixed(2);
+    document.getElementById('prod-calc-final').textContent  = 'Rs.' + finalSell.toFixed(2);
+    document.getElementById('prod-calc-tax').textContent    = 'Rs.' + taxIncl.toFixed(2);
+    document.getElementById('prod-calc-margin').textContent = margin.toFixed(1) + '%';
+    document.getElementById('prod-calc-profit').textContent = 'Rs.' + profit.toFixed(2);
+    document.getElementById('prod-calc-margin').style.color = margin < 0 ? 'var(--red)' : margin < 10 ? 'var(--yellow)' : 'var(--green)';
+    document.getElementById('prod-calc-profit').style.color = profit < 0 ? 'var(--red)' : 'var(--accent)';
+  } else {
+    summary.style.display = 'none';
+  }
+}
+
+// NOTE: This used to re-override openProductModal/editProduct/saveProduct
+// with a version that read/wrote the fake DB.products array on top of the
+// real API calls (and called the real async saveProduct() without awaiting
+// it, racing the DB.products write against the actual save). The real
+// implementations above already handle discount_percent/tax_rate directly
+// against the backend, so this whole patch was redundant AND buggy — removed.
+
+// ── CUSTOMER COLLECTION — full v2 with username filter ─
+if (!DB.collectionPayments) DB.collectionPayments = [];
+if (!DB.saleReturns)      DB.saleReturns = [];
+if (!DB.purchaseReturns)  DB.purchaseReturns = [];
+
+let _colCustomerCache = [];
+let _colSalesCache = [];
+// {customerId: {amount_owed,total_paid,remaining}} straight from the ledger maths —
+// nets EVERY payment (invoice-specific + advance/General Collection).
+let _colBalances = {};
+
+// Card under the 4 KPIs: for the customers billed TODAY — how much of their
+// previous (pre-today) balance is still pending, and how much of the old
+// balance was collected today. Same "today" and same payment dates as the
+// "Received Today" card, so the figures line up.
+function updateColPrevCard() {
+  if (!document.getElementById('col-prev-pending')) return;
+  const today = new Date().toISOString().split('T')[0];
+  const isToday = (iso) => (iso || '').slice(0, 10) === today;
+  const live = _colSalesCache.filter(b => !['draft', 'cancelled', 'returned'].includes(b.status));
+  const todays = live.filter(b => isToday(b.created_at));
+
+  // A customer's earliest bill today carries exactly their balance from before
+  // today (live — payments made since are already taken off).
+  const first = new Map();
+  todays.forEach(b => {
+    if (!b.customer) return;
+    const cur = first.get(b.customer);
+    if (!cur || (b.created_at || '') < (cur.created_at || '') || ((b.created_at || '') === (cur.created_at || '') && b.id < cur.id)) first.set(b.customer, b);
+  });
+  let pending = 0;
+  first.forEach(b => { pending += Math.max(0, Number(b.previous_balance) || 0); });
+
+  // Money received today against bills booked before today.
+  let received = 0;
+  live.filter(b => !isToday(b.created_at)).forEach(b =>
+    (b.payments || []).forEach(p => { if (isToday(p.created_at)) received += Number(p.amount) || 0; }));
+
+  const fmt = n => 'Rs.' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  document.getElementById('col-today-bills').textContent = todays.length;
+  document.getElementById('col-today-bills-sub').textContent = first.size + ' customer' + (first.size === 1 ? '' : 's') + ' billed';
+  document.getElementById('col-prev-pending').textContent = fmt(pending);
+  document.getElementById('col-prev-received').textContent = fmt(received);
+}
+
+function _custBookings(custId, fromDT, toDT) {
+  let list = _colSalesCache.filter(b => b.customer === custId);
+  if (fromDT || toDT) list = list.filter(b => _inDT(b.created_at, fromDT, toDT));
+  return list;
+}
+
+// Shared bounds check — same "YYYY-MM-DDTHH:MM" comparison Order Summary
+// uses. fromDT/toDT are full datetime strings (or '' for no limit on that
+// side), so leaving one side blank simply removes that bound instead of
+// forcing a full range.
+function _inDT(createdAt, fromDT, toDT) {
+  const dt = (createdAt || '').slice(0, 16);
+  if (!dt) return false;
+  if (fromDT && dt < fromDT) return false;
+  if (toDT   && dt > toDT)   return false;
+  return true;
+}
+
+// custId's balance AS OF the selected window: orders billed in the window,
+// minus payments actually received in the window (a payment collected
+// today against an older invoice still counts as "received" today, even
+// though that invoice itself was booked outside the window — so payments
+// are checked against ALL of the customer's bookings, not just the ones
+// whose own created_at falls in range).
+function getCustomerBalance(custId, fromDT, toDT) {
+  const filtered = fromDT || toDT ? true : false;
+  const allBookings = _colSalesCache.filter(b => b.customer === custId);
+  const bookingsInRange = filtered ? allBookings.filter(b => _inDT(b.created_at, fromDT, toDT)) : allBookings;
+  // b.total_amount is already net of any returns against this sale — see
+  // process_return in services.py, which nets the refund straight off the
+  // invoice's own total_amount at the source. Don't subtract refunds again
+  // here on top of that; b.total_amount is already correct.
+  const totalOrders = bookingsInRange.reduce((s, b) => s + Number(b.total_amount), 0);
+  const payments = filtered
+    ? allBookings.reduce((s, b) => s + (b.payments||[]).filter(p => _inDT(p.created_at, fromDT, toDT)).reduce((a,p)=>a+Number(p.amount),0), 0)
+    : allBookings.reduce((s, b) => s + Number(b.paid_amount), 0);
+  return { totalOrders, payments, balance: totalOrders - payments };
+}
+
+// TRUE remaining balance for a customer across ALL their active invoices
+// (never date-windowed) — this is what decides whether "+ Pay" is allowed.
+// A customer whose invoices are all fully paid has nothing left to collect,
+// no matter which date/username filter the ledger is currently showing.
+function getCustomerTrueDue(custId) {
+  if (!custId) return 0;
+  const led = _colBalances[custId];
+  if (led) return Math.max(0, Math.round(Number(led.remaining) * 100) / 100);
+  const due = _colSalesCache
+    .filter(b => b.customer === custId)
+    .reduce((s, b) => s + Math.max(0, Number(b.total_amount) - Number(b.paid_amount)), 0);
+  return Math.max(0, Math.round(due * 100) / 100);
+}
+
+// Shared popup shown any time someone tries to add a payment to an account
+// that is already fully paid (Collection "+ Pay", Ledger "Collect Payment").
+function showNoPaymentRemaining(customerName) {
+  return confirmModal(
+    (customerName ? customerName + ': ' : '') + 'No payment remaining — this account is already clear. A new payment can only be added after a new bill is created.',
+    { title: 'Already Clear', confirmText: 'OK', cancelText: 'Close', danger: false, icon: 'fa-check-circle' }
+  );
+}
+
+// Renders the "+ Pay" button: disabled/locked when the customer's real
+// balance is zero.
+function collectionPayBtn(custId) {
+  const due = getCustomerTrueDue(custId);
+  if (due <= 0) {
+    return `<button class="btn btn-green btn-xs" disabled title="Account already clear — no payment remaining" style="opacity:.45;cursor:not-allowed" onclick="openCollectionPayment(${custId})"><i class="fa fa-lock"></i> Pay</button>`;
+  }
+  return `<button class="btn btn-green btn-xs" onclick="openCollectionPayment(${custId})" title="Record payment"><i class="fa fa-plus"></i> Pay</button>`;
+}
+
+function getTodayOrders(custId) {
+  const today = new Date().toISOString().split('T')[0];
+  // b.total_amount is already net of returns (see getCustomerBalance above).
+  return _custBookings(custId)
+    .filter(b => (b.created_at||'').slice(0,10) === today)
+    .reduce((s, b) => s + Number(b.total_amount), 0);
+}
+
+function getLastPaymentDate(custId) {
+  const allPayments = [];
+  _custBookings(custId).forEach(b => (b.payments||[]).forEach(p => allPayments.push(p)));
+  if (!allPayments.length) return '—';
+  return allPayments.sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''))[0].created_at.slice(0,10);
+}
+
+// Build username summary: all sales served by a username, grouped by
+// customer, restricted to the selected date+time window (fromDT/toDT —
+// either side blank means "no limit" on that side, same as Order Summary).
+function getUsernameCollectionRows(username, fromDT, toDT) {
+  const lc = username.toLowerCase();
+  let bookings = _colSalesCache.filter(b => (b.served_by_name||'').toLowerCase().includes(lc));
+  if (fromDT || toDT) bookings = bookings.filter(b => _inDT(b.created_at, fromDT, toDT));
+  const byCustomer = {};
+  bookings.forEach(b => {
+    const key = b.customer || b.customer_name;
+    if (!byCustomer[key]) byCustomer[key] = { customerId: b.customer || null, customerName: b.customer_name||'Walk-in', accountNo: b.customer?(accNo(b.customer, b.customer_account_no)):'—', username: b.served_by_name||username, invoices: [], totalBill: 0, discAmt: 0, taxAmt: 0, received: 0 };
+    byCustomer[key].invoices.push(b.invoice_number);
+    byCustomer[key].totalBill += Number(b.total_amount);
+    byCustomer[key].discAmt  += Number(b.discount_amount);
+    byCustomer[key].taxAmt   += Number(b.tax_amount);
+    byCustomer[key].received += Number(b.paid_amount);
+  });
+  return Object.values(byCustomer).map(r => ({
+    ...r,
+    invoiceCount: r.invoices.length,
+    // Clamped — an overpaid/advance account never shows a negative pending
+    // figure here, and that advance is never carried over onto a different
+    // bill; it simply isn't applied anywhere but stays 0/0 once cleared.
+    pending: Math.max(0, r.totalBill - r.received),
+    totalCollection: r.totalBill
+  }));
+}
+
+async function renderCollection() {
+  // page_size:2000 — was 500, which silently capped the Collection page at
+  // the first 500 customers/sales (same class of bug as the earlier order
+  // booking fix: a hardcoded page_size below max_page_size hides everything
+  // past the cut). See apps/core/pagination.py — max_page_size is 2000.
+  const [custData, salesData, balData] = await Promise.all([
+    CustomersAPI.list({ page_size: 2000 }), SalesAPI.list({ page_size: 2000 }),
+    CustomersAPI.balances().catch(() => null),
+  ]);
+  _colBalances = (balData && balData.balances) || {};
+  _colCustomerCache = (custData.results || custData).map(c => ({ ...c, name: c.name, phone: c.phone, accountNo: accNo(c.id, c.account_no) }));
+  // Exclude both cancelled AND fully-returned sales — a bill that was voided
+  // (e.g. edited from cash to credit, which cancels/returns the old invoice
+  // and creates a fresh one) must disappear from Collection entirely, not
+  // just the ones explicitly marked 'cancelled'. A partially-returned sale
+  // still has a legitimate remaining balance (its total_amount is already
+  // net of the return — see process_return in services.py), so it stays
+  // included with no further adjustment needed here.
+  _colSalesCache = (salesData.results || salesData).filter(b => !['cancelled', 'returned'].includes(b.status));
+
+  const q           = (document.getElementById('col-search')?.value||'').toLowerCase();
+  // Date and time are independent, same as Order Summary: leaving either
+  // side (from/to, date/time) blank just means "no limit" on that side —
+  // e.g. From date empty + To date = today shows everything UP TO today,
+  // with no lower bound at all, instead of being forced into a range.
+  const dateFrom = document.getElementById('col-date-from')?.value || '';
+  const dateTo   = document.getElementById('col-date-to')?.value   || '';
+  const timeFrom = document.getElementById('col-time-from')?.value || '';
+  const timeTo   = document.getElementById('col-time-to')?.value   || '';
+  const dateFromDT = dateFrom ? `${dateFrom}T${timeFrom || '00:00'}` : '';
+  const dateToDT   = dateTo   ? `${dateTo}T${timeTo   || '23:59'}` : '';
+  const balFilter   = document.getElementById('col-balance-filter')?.value||'';
+  const usernameQ   = (document.getElementById('col-username-filter')?.value||'').toLowerCase().trim();
+  const viewMode    = document.getElementById('col-view-mode')?.value || 'customer';
+  const tbody = document.getElementById('collection-tbody');
+  const label = document.getElementById('col-count-label');
+  if (!tbody) return;
+
+  const today         = new Date().toISOString().split('T')[0];
+  const thirtyDaysAgo = new Date(Date.now()-30*24*60*60*1000).toISOString().split('T')[0];
+
+  // ── Username view: group by username ──
+  if (viewMode === 'username' && usernameQ) {
+    let rows = getUsernameCollectionRows(usernameQ, dateFromDT, dateToDT);
+    // Balance Filter must work in this view too (it used to be ignored here,
+    // so "Has Pending" still listed fully-paid customers).
+    rows = rows.filter(r => {
+      if (balFilter === 'pending') return r.pending > 0.009;
+      if (balFilter === 'clear')   return r.pending <= 0.009;
+      if (balFilter === 'overdue') return r.pending > 0.009 && r.customerId && getLastPaymentDate(r.customerId) < thirtyDaysAgo;
+      return true;
+    });
+    if (label) label.textContent = rows.length + ' record(s) for "' + usernameQ + '"';
+
+    // Update KPIs
+    const kpiTotal = rows.reduce((s,r) => s+r.totalCollection, 0);
+    const kpiPending = rows.reduce((s,r) => s+r.pending, 0);
+    if (document.getElementById('col-total-customers')) document.getElementById('col-total-customers').textContent = rows.length;
+    if (document.getElementById('col-total-pending')) document.getElementById('col-total-pending').textContent = 'Rs.' + kpiPending.toFixed(0);
+    if (document.getElementById('col-total-received')) document.getElementById('col-total-received').textContent = 'Rs.' + (kpiTotal - kpiPending).toFixed(0);
+    updateColPrevCard();
+
+    // Render username-view table
+    const colHead = document.getElementById('col-thead');
+    if (colHead) colHead.innerHTML = `<tr>
+      <th>Customer</th><th>Account</th><th>Username</th>
+      <th>Invoices</th><th>Total Bill</th><th>Tax</th><th>Disc.</th>
+      <th>Received</th><th>Pending</th><th>Actions</th></tr>`;
+
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-user-tag" style="font-size:32px;display:block;margin-bottom:10px;opacity:.3"></i>No records for this username</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = rows.map(r => `<tr>
+      <td style="font-weight:700">${r.customerName}</td>
+      <td class="td-mono">${r.accountNo}</td>
+      <td><span style="background:var(--accent-glow);color:var(--accent);font-size:11px;padding:2px 8px;border-radius:4px;font-family:var(--mono)">${r.username}</span></td>
+      <td style="text-align:center;font-weight:700">${r.invoiceCount}</td>
+      <td class="fw-700 td-mono">Rs.${r.totalBill.toFixed(2)}</td>
+      <td class="td-mono" style="color:var(--yellow)">${r.taxAmt>0?'Rs.'+r.taxAmt.toFixed(2):'—'}</td>
+      <td class="td-mono" style="color:var(--green)">${r.discAmt>0?'Rs.'+r.discAmt.toFixed(2):'—'}</td>
+      <td class="fw-700 td-mono text-green">Rs.${(r.received||0).toFixed(2)}</td>
+      <td class="fw-700 td-mono" style="color:${r.pending>0?'var(--red)':'var(--green)'}">Rs.${r.pending.toFixed(2)}</td>
+      <td><button class="btn btn-ghost btn-xs" onclick="printUsernameCollection('${r.username}')" title="Print"><i class="fa fa-print"></i></button>
+      ${r.customerId ? collectionPayBtn(r.customerId) : ''}</td>
+    </tr>`).join('');
+    return;
+  }
+
+  // ── Default customer view ──
+  const colHead = document.getElementById('col-thead');
+  if (colHead) colHead.innerHTML = `<tr>
+    <th>Customer</th><th>Account No.</th><th>Prev. Balance</th>
+    <th>Today's Orders</th><th>Total Pending</th><th>Received</th>
+    <th>Remaining</th><th>Last Payment</th><th>Actions</th></tr>`;
+
+  let rows = _colCustomerCache.map(c => {
+    const bal = getCustomerBalance(c.id, dateFromDT, dateToDT);
+    const todayOrders = getTodayOrders(c.id);
+    const lastPay     = getLastPaymentDate(c.id);
+    // Real balance = bills minus EVERY payment (incl. advance/General Collection),
+    // straight from the ledger — never the raw bill total.
+    const led = _colBalances[c.id];
+    const totalPending = led ? Number(led.remaining) : (bal.totalOrders - bal.payments);
+    if (led && !(dateFromDT || dateToDT)) { bal.payments = Number(led.total_paid); }
+    return { ...c, ...bal, todayOrders, lastPay, totalPending };
+  });
+
+  rows = rows.filter(r => {
+    if (q && !(r.name||'').toLowerCase().includes(q) && !(r.phone||'').toLowerCase().includes(q) && !(r.accountNo||'').toLowerCase().includes(q)) return false;
+    if (usernameQ) {
+      const hasBk = _custBookings(r.id).some(b => (b.served_by_name||'').toLowerCase().includes(usernameQ));
+      if (!hasBk) return false;
+    }
+    if (balFilter === 'pending' && r.totalPending <= 0) return false;
+    if (balFilter === 'clear'   && r.totalPending > 0) return false;
+    if (balFilter === 'overdue' && (r.lastPay > thirtyDaysAgo || r.totalPending <= 0)) return false;
+    return true;
+  });
+
+  const totalPending  = rows.reduce((s,r) => s+Math.max(0, r.totalPending), 0);
+  const totalReceived = _colSalesCache.reduce((s,b) => s + (b.payments||[]).filter(p=>(p.created_at||'').slice(0,10)===today).reduce((a,p)=>a+Number(p.amount),0), 0);
+  const overdueCount  = rows.filter(r => r.totalPending>0 && r.lastPay<thirtyDaysAgo).length;
+
+  if (document.getElementById('col-total-customers')) document.getElementById('col-total-customers').textContent = rows.length;
+  if (document.getElementById('col-total-pending'))   document.getElementById('col-total-pending').textContent   = 'Rs.'+totalPending.toFixed(0);
+  if (document.getElementById('col-total-received'))  document.getElementById('col-total-received').textContent  = 'Rs.'+totalReceived.toFixed(2);
+  if (document.getElementById('col-overdue-count'))   document.getElementById('col-overdue-count').textContent   = overdueCount;
+  updateColPrevCard();
+  if (label) label.textContent = rows.length + ' account' + (rows.length!==1?'s':'');
+
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa fa-hand-holding-usd" style="font-size:32px;display:block;margin-bottom:10px;opacity:.3"></i>No customers found</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = rows.map(r => {
+    const remaining  = Math.max(0, r.totalPending);
+    const statusClass = remaining<=0 ? 'badge-green' : r.lastPay<thirtyDaysAgo ? 'badge-red' : 'badge-yellow';
+    const statusText  = remaining<=0 ? 'Cleared' : r.lastPay<thirtyDaysAgo ? 'Overdue' : 'Pending';
+    return `<tr>
+      <td>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--cyan));display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff;flex-shrink:0">${(r.name||'?')[0].toUpperCase()}</div>
+          <div>
+            <div style="font-weight:700">${r.name}</div>
+            <div style="font-size:11px;color:var(--text-muted)">${r.phone||'—'}</div>
+          </div>
+        </div>
+      </td>
+      <td class="td-mono">${r.accountNo||'—'}</td>
+      <td class="fw-700 td-mono text-red">Rs.${(r.totalOrders-r.todayOrders).toFixed(2)}</td>
+      <td class="fw-700 td-mono text-accent">Rs.${r.todayOrders.toFixed(2)}</td>
+      <td><span class="badge ${statusClass}">${statusText}</span> <span class="fw-700 td-mono">Rs.${r.totalOrders.toFixed(2)}</span></td>
+      <td class="fw-700 td-mono text-green">Rs.${r.payments.toFixed(2)}</td>
+      <td class="fw-700 td-mono" style="color:${remaining<=0?'var(--green)':'var(--red)'}">Rs.${remaining.toFixed(2)}</td>
+      <td style="font-size:12px;color:var(--text-secondary)">${r.lastPay}</td>
+      <td>
+        ${collectionPayBtn(r.id)}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function openCollectionPayment(custId) {
+  const c = _colCustomerCache.find(x => x.id===custId); if (!c) return;
+
+  // getCustomerBalance() only sums each booking's own total/paid amount,
+  // so it has no idea a customer already has an advance sitting from a
+  // General Collection payment made on the Ledger Accounts screen (that
+  // money lives on a standalone Payment row, not on any one invoice). It
+  // used to show the invoice's full total as still outstanding here even
+  // after that advance had already covered part (or all) of it, so staff
+  // paying "the full cash bill" from this screen were quietly asked to
+  // collect money a second time. The ledger endpoint is the one place
+  // that nets every payment — invoice-specific and general — against
+  // everything billed, so pull the real figure from there instead.
+  let remaining;
+  try {
+    const ledger = await CustomersAPI.ledger(custId);
+    remaining = Math.max(0, Number(ledger.remaining) || 0);
+  } catch (err) {
+    const bal = getCustomerBalance(custId);
+    remaining = Math.max(0, bal.totalOrders - bal.payments);
+  }
+
+  if (remaining <= 0.009) {
+    await showNoPaymentRemaining(c.name);
+    renderCollection();
+    return;
+  }
+
+  // A payment belongs to ONE bill — the one chosen here — and never spills
+  // onto the customer's other bills. Default = the newest unpaid bill inside
+  // the period currently shown on the Collection screen (e.g. today's bill).
+  const cf = getCollectionFilters();
+  const unpaid = _custBookings(custId)
+    .filter(b => Number(b.due_amount) > 0.009)
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+  if (!unpaid.length) { toast('This customer has no unpaid invoices.', 'warning'); return; }
+  const inPeriod = unpaid.filter(b => _inDT(b.created_at, cf.dateFromDT, cf.dateToDT));
+  const pick = inPeriod[0] || unpaid[0];
+  _colPayLedgerRemaining = remaining;
+  document.getElementById('col-pay-sale').innerHTML = unpaid.map(b =>
+    `<option value="${b.id}" ${b.id === pick.id ? 'selected' : ''}>${b.invoice_number} · ${(b.created_at || '').slice(0, 10)} · Due Rs.${Number(b.due_amount).toFixed(2)}</option>`
+  ).join('');
+
+  document.getElementById('col-pay-cust-id').value       = custId;
+  document.getElementById('col-pay-cust-name').value     = c.name;
+  document.getElementById('col-pay-amount').value        = '';
+  document.getElementById('col-pay-date').value          = new Date().toISOString().split('T')[0];
+  document.getElementById('col-pay-notes').value         = '';
+  onColPaySaleChange();
+  _colPaySyncButton();   // Record Payment stays disabled until a valid amount is entered
+  openModal('col-payment-modal');
+}
+
+// Customer's real remaining (ledger, nets any advance) — a payment can never
+// exceed it, whichever bill it is being applied to.
+let _colPayLedgerRemaining = 0;
+
+function onColPaySaleChange() {
+  const saleId = parseInt(document.getElementById('col-pay-sale')?.value);
+  const sale = _colSalesCache.find(b => b.id === saleId);
+  const billDue = sale ? Number(sale.due_amount) || 0 : 0;
+  const due = Math.max(0, Math.round(Math.min(billDue, _colPayLedgerRemaining) * 100) / 100);
+  document.getElementById('col-pay-outstanding').value = 'Rs.' + due.toFixed(2);
+  const amt = document.getElementById('col-pay-amount');
+  if (amt) amt.max = due.toFixed(2);
+  calcColRemaining();
+}
+
+// Guards against the over-payment popup firing repeatedly while it is open.
+let _colOverPopupOpen = false;
+
+// Single source of truth for "what is still due on the selected bill".
+function _colPayDue() {
+  const outStr = document.getElementById('col-pay-outstanding')?.value || 'Rs.0';
+  return Math.round((parseFloat(outStr.replace('Rs.', '')) || 0) * 100) / 100;
+}
+
+// Enables Record Payment only for a valid amount: > 0 and never above the
+// bill's remaining due.
+function _colPaySyncButton() {
+  const btn = document.getElementById('col-pay-save');
+  const errEl = document.getElementById('col-pay-error');
+  const amtEl = document.getElementById('col-pay-amount');
+  const due = _colPayDue();
+  const paying = parseFloat(amtEl?.value) || 0;
+  const exceeds = paying > due + 0.004;
+  const invalid = paying <= 0 || exceeds || due <= 0;
+  if (btn) {
+    btn.disabled = invalid;
+    btn.style.opacity = invalid ? '.5' : '';
+    btn.style.cursor = invalid ? 'not-allowed' : '';
+  }
+  if (amtEl) amtEl.style.borderColor = exceeds ? 'var(--red)' : '';
+  if (errEl) {
+    errEl.style.display = exceeds ? 'block' : 'none';
+    errEl.textContent = exceeds
+      ? `Amount is more than the bill's due. Maximum allowed: Rs.${due.toFixed(2)}`
+      : '';
+  }
+}
+
+async function calcColRemaining() {
+  const outstanding = _colPayDue();
+  const amtEl = document.getElementById('col-pay-amount');
+  let paying = parseFloat(amtEl?.value) || 0;
+
+  // Entered more than the bill's actual due → block Record Payment, warn,
+  // then cut the amount back to the actual due so it can never exceed it.
+  if (paying > outstanding + 0.004) {
+    _colPaySyncButton();                       // button disabled + red message right away
+    if (!_colOverPopupOpen) {
+      _colOverPopupOpen = true;
+      await confirmModal(
+        `You entered Rs.${paying.toFixed(2)}, but only Rs.${outstanding.toFixed(2)} is due on this invoice. ` +
+        `Payment can't be more than the invoice's actual due — the amount has been reduced to Rs.${outstanding.toFixed(2)}.`,
+        { title: 'Payment exceeds invoice amount', confirmText: 'OK', cancelText: 'Close', danger: false, icon: 'fa-exclamation-triangle' }
+      );
+      _colOverPopupOpen = false;
+    }
+    // Cut to actual (re-read: user may have kept typing while popup was open)
+    const now = parseFloat(amtEl.value) || 0;
+    if (now > outstanding + 0.004) amtEl.value = outstanding > 0 ? outstanding.toFixed(2) : '';
+    paying = parseFloat(amtEl.value) || 0;
+  }
+
+  const rem = Math.max(0, outstanding - paying);
+  const remEl = document.getElementById('col-pay-remaining');
+  remEl.textContent = 'Rs.' + rem.toFixed(2);
+  remEl.style.color = rem === 0 ? 'var(--green)' : 'var(--yellow)';
+  _colPaySyncButton();
+}
+
+async function saveCollectionPayment() {
+  const custId = parseInt(document.getElementById('col-pay-cust-id').value);
+  let amount = parseFloat(document.getElementById('col-pay-amount').value);
+  if (!amount || amount<=0) { toast('Enter a valid payment amount!','error'); return; }
+  const method = document.getElementById('col-pay-method').value;
+  const c = _colCustomerCache.find(x => x.id===custId);
+
+  // col-pay-outstanding = what is still due on the CHOSEN bill, already capped
+  // by the customer's real ledger balance (which nets any advance). Capping to
+  // it — instead of trusting what the cashier typed — stops the same money
+  // being collected twice.
+  const saleId = parseInt(document.getElementById('col-pay-sale')?.value);
+  const sale = _colSalesCache.find(b => b.id === saleId);
+  if (!sale) { toast('Select the bill this payment is for.', 'warning'); return; }
+
+  const trueOutstanding = parseFloat((document.getElementById('col-pay-outstanding')?.value||'Rs.0').replace('Rs.','')) || 0;
+  if (amount > trueOutstanding + 0.004) {
+    // Never silently accept more than the invoice's actual due.
+    document.getElementById('col-pay-amount').value = trueOutstanding > 0 ? trueOutstanding.toFixed(2) : '';
+    calcColRemaining();
+    toast(`Only Rs.${trueOutstanding.toFixed(2)} is due on ${sale.invoice_number} — payment can't exceed it.`, 'error');
+    return;
+  }
+  if (amount <= 0) { closeModal('col-payment-modal'); await showNoPaymentRemaining(c?.name); renderCollection(); return; }
+
+  // The payment goes onto THIS bill only (via the real SalesAPI.pay endpoint);
+  // the customer's other bills are never touched.
+  try {
+    await SalesAPI.pay(sale.id, { amount, method });
+    _slipsLoaded = false;   // Sale Slips list must reload (live Previous Balance)
+    closeModal('col-payment-modal');
+    await renderCollection();
+    const left = Math.max(0, Number(sale.due_amount) - amount);
+    toast({ title: 'Payment recorded', text: `Rs.${amount.toFixed(2)} received on ${_bkEsc(sale.invoice_number)} (${_bkEsc(c?.name || '')}) — Rs.${left.toFixed(2)} still due on this bill.`, kind: 'add' }, 'success');
+  } catch (err) {
+    toast(err.message || 'Failed to record payment', 'error');
+  }
+}
+
+function clearCollectionFilters() {
+  ['col-search','col-date-from','col-date-to','col-time-from','col-time-to','col-username-filter'].forEach(id => {
+    const el=document.getElementById(id); if(el) el.value='';
+  });
+  ['col-date-from','col-date-to','col-time-from','col-time-to'].forEach(id => syncDtDisplay(id));
+  const bf=document.getElementById('col-balance-filter'); if(bf) bf.value='';
+  const vm=document.getElementById('col-view-mode'); if(vm) vm.value='customer';
+  renderCollection();
+}
+
+// A focused, field-ready sheet for order bookers: just the customers who
+// actually owe money, the exact amount to collect, and a signature line —
+// deliberately simpler than the full Collection Ledger so there's no
+// ambiguity about what to collect or from whom.
+// Reads the SAME date/time/search/balance/username filters the Collection
+// table itself is currently using, so every print action on this screen
+// (Today's/Period's Collection Sheet, Print Report) shows exactly what's
+// filtered on screen right now — never a hardcoded "today", never "all
+// customers regardless of filter".
+// "Prev Balance" on/off switch (Customer Collection header, between Print
+// Collection and Print Report). ON = the printed Collection Sheet adds a separate
+// Previous Balance table (with its own total) below the collection total;
+// OFF = only the collection table prints.
+// Remembered across reloads; defaults to ON.
+const COL_PRINT_PREV_KEY = 'smartretail_col_print_prev';
+function colPrintPrevOn() {
+  try { return localStorage.getItem(COL_PRINT_PREV_KEY) !== '0'; } catch (_) { return true; }
+}
+function colTogglePrev(el) {
+  const on = !colPrintPrevOn();
+  try { localStorage.setItem(COL_PRINT_PREV_KEY, on ? '1' : '0'); } catch (_) {}
+  const bg = el.querySelector('.col-prev-bg'), dot = el.querySelector('.col-prev-dot');
+  if (bg)  bg.style.background = on ? 'var(--accent)' : 'var(--border)';
+  if (dot) dot.style.left      = on ? '18px' : '2px';
+  el.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
+function getCollectionFilters() {
+  const dateFrom = document.getElementById('col-date-from')?.value || '';
+  const dateTo   = document.getElementById('col-date-to')?.value   || '';
+  const timeFrom = document.getElementById('col-time-from')?.value || '';
+  const timeTo   = document.getElementById('col-time-to')?.value   || '';
+  const todayISO = new Date().toISOString().split('T')[0];
+  // No date filter picked at all -> same default as before: just today.
+  const hasRange = !!(dateFrom || dateTo);
+  const fromISO  = dateFrom || (hasRange ? '' : todayISO);
+  const toISO    = dateTo   || (hasRange ? '' : todayISO);
+  return {
+    dateFrom: fromISO, dateTo: toISO,
+    dateFromDT: fromISO ? `${fromISO}T${timeFrom || '00:00'}` : '',
+    dateToDT:   toISO   ? `${toISO}T${timeTo   || '23:59'}` : '',
+    q:          (document.getElementById('col-search')?.value || '').toLowerCase(),
+    balFilter:  document.getElementById('col-balance-filter')?.value || '',
+    usernameQ:  (document.getElementById('col-username-filter')?.value || '').toLowerCase().trim(),
+    viewMode:   document.getElementById('col-view-mode')?.value || 'customer',
+    // Human label for the header of the printed sheet — "Today", a single
+    // chosen date, or a from–to range.
+    label: !hasRange ? 'Today (' + new Date().toLocaleDateString('en-PK') + ')'
+         : (dateFrom && dateTo && dateFrom === dateTo) ? new Date(dateFrom).toLocaleDateString('en-PK')
+         : `${dateFrom ? new Date(dateFrom).toLocaleDateString('en-PK') : 'Start'} – ${dateTo ? new Date(dateTo).toLocaleDateString('en-PK') : 'Now'}`,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Collection Sheet pagination
+// Every printed page is its own .a4-doc (so it always starts on a fresh sheet)
+// and holds at most COL_PAGE_ROWS customers (29). Rows have a FIXED height
+// (nowrap + ellipsis), so the page budget below is exact rather than a guess.
+// Layout when "Prev Balance" is ON:
+//   1) normal collection table(s) per username  →  TOTAL COLLECTION EXPECTED
+//   2) a separate Previous Balance table(s) per username (one row per customer
+//      billed in the period)  →  TOTAL PREVIOUS BALANCE PENDING
+// When it is OFF only part 1 prints. Anything that doesn't fit flows onto the
+// next page; a username split across pages repeats its heading "(contd.)".
+// ─────────────────────────────────────────────────────────────────────────
+const COL_PAGE_ROWS = 29;         // customers per printed page
+const COL_PAGE_BUDGET_FIRST = 1050; // usable content height, page 1 (no top page-margin)
+const COL_PAGE_BUDGET_NEXT = 990;   // usable content height, pages 2+
+const COL_H = { hdrFirst: 92, hdrNext: 34, banner: 34, ghead: 24, thead: 25, row: 28, sub: 27, total: 46, notes: 112 };   // row = 25px + 3px gap
+
+function colEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// sections: [{ kind:'main'|'prev', groups:[{username, rows:[...]}], ... }]
+// → pages: [[block, block, ...], ...]
+function colPaginate(sections) {
+  const H = COL_H, pages = [];
+  let page = null, used = 0, rowsOnPage = 0;
+  const open = () => {
+    page = []; pages.push(page);
+    used = pages.length === 1 ? H.hdrFirst : H.hdrNext;
+    rowsOnPage = 0;
+  };
+  const room = px => used + px <= (pages.length === 1 ? COL_PAGE_BUDGET_FIRST : COL_PAGE_BUDGET_NEXT);
+  open();
+
+  sections.forEach((sec, si) => {
+    if (si > 0) {
+      // Section heading must travel together with at least its first group + row.
+      if (!room(H.banner + H.ghead + H.thead + H.row + H.sub)) open();
+      page.push({ t: 'banner', sec }); used += H.banner;
+    }
+    sec.groups.forEach(g => {
+      let block = null, i = 0;
+      while (i < g.rows.length) {
+        const last = i === g.rows.length - 1;
+        const need = H.row + (last ? H.sub : 0);
+        if (!block) {
+          if (rowsOnPage >= COL_PAGE_ROWS || !room(H.ghead + H.thead + need)) open();
+          block = { t: 'group', sec, user: g.username, cont: i > 0, rows: [], sub: false, count: g.rows.length };
+          page.push(block); used += H.ghead + H.thead;
+        }
+        if (rowsOnPage >= COL_PAGE_ROWS || !room(need)) { block = null; open(); continue; }
+        block.rows.push({ r: g.rows[i], n: i + 1 });
+        used += H.row; rowsOnPage++; i++;
+        if (i === g.rows.length) { block.sub = true; used += H.sub; block.subTotal = g.subTotal; }
+      }
+    });
+    if (!room(H.total)) open();
+    page.push({ t: 'total', sec }); used += H.total;
+  });
+
+  if (!room(H.notes)) open();
+  page.push({ t: 'notes' });
+  return pages;
+}
+
+function colBlockHtml(b) {
+  const TD = 'padding:0 8px;height:24px;line-height:15px;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid #cfd4da;';
+  const TH = 'padding:0 8px;height:22px;line-height:14px;vertical-align:middle;font-size:11px;white-space:nowrap;';
+
+  if (b.t === 'banner') {
+    return `<div style="margin-top:8px;height:26px;line-height:26px;padding:0 12px;box-sizing:border-box;background:#d9d9d9;border:1px solid #888;font-size:13px;font-weight:900;white-space:nowrap">${colEsc(b.sec.title)}</div>`;
+  }
+
+  if (b.t === 'group') {
+    const isMain = b.sec.kind === 'main';
+    const cols = isMain
+      ? [5, 18, 29, 9, 24, 15]
+      : [5, 20, 38, 10, 27];
+    const heads = isMain
+      ? [['#', 'left'], ['Invoice', 'left'], ['Customer', 'left'], ['Mode', 'center'], ['Amount to Collect', 'right'], ['Signature', 'center']]
+      : [['#', 'left'], ['First Invoice', 'left'], ['Customer', 'left'], ['Bills', 'center'], ['Previous Balance', 'right']];
+    const rowsHtml = b.rows.map(({ r, n }) => {
+      const bg = n % 2 ? '#f6f7f9' : '#eceef2';
+      if (isMain) {
+        const modeCol = r.mode === 'Cash' ? ['#dcfce7', '#166534'] : ['#fee2e2', '#991b1b'];
+        return `<tr style="height:25px;background:${bg}">
+          <td style="${TD}color:#666">${n}</td>
+          <td style="${TD}font-family:monospace;font-size:10.5px">${colEsc(r.invoice)}</td>
+          <td style="${TD}font-weight:700;font-size:11.5px">${colEsc(r.customer)}</td>
+          <td style="${TD}text-align:center"><span style="padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;background:${modeCol[0]};color:${modeCol[1]}">${r.mode}</span></td>
+          <td style="${TD}text-align:right;font-weight:900;font-size:11.5px;color:${r.total > 0.009 ? '#dc2626' : '#166534'}">Rs.${r.total.toFixed(2)}${r.total <= 0.009 ? ' <span style="font-size:9.5px">(Paid)</span>' : (r.paid > 0.009 ? ` <span style="font-size:9px;font-weight:600;color:#666">(of ${r.billTotal.toFixed(2)})</span>` : '')}</td>
+          <td style="${TD}border:1px solid #ccc;background:#fff"></td>
+        </tr>`;
+      }
+      const pv = r.prevBal;
+      return `<tr style="height:25px;background:${bg}">
+          <td style="${TD}color:#666">${n}</td>
+          <td style="${TD}font-family:monospace;font-size:10.5px">${colEsc(r.invoice)}</td>
+          <td style="${TD}font-weight:700;font-size:11.5px">${colEsc(r.customer)}</td>
+          <td style="${TD}text-align:center">${r.bills}</td>
+          <td style="${TD}text-align:right;font-weight:900;font-size:11.5px;color:${pv < 0 ? '#166534' : (pv > 0.009 ? '#dc2626' : '#666')}">${pv < 0 ? '(Adv) ' : ''}Rs.${Math.abs(pv).toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+    const subLabel = isMain ? `Subtotal — ${colEsc(b.user)}` : `Previous Balance Subtotal — ${colEsc(b.user)}`;
+    const subRow = b.sub ? `<tr style="height:24px;background:#e3e5ea">
+          <td colspan="4" style="padding:0 8px;height:24px;font-weight:800;font-size:11.5px;white-space:nowrap">${subLabel}</td>
+          <td style="padding:0 6px;text-align:right;font-weight:900;font-size:12px;color:#dc2626;white-space:nowrap">Rs.${b.subTotal.toFixed(2)}</td>
+          ${isMain ? '<td></td>' : ''}
+        </tr>` : '';
+    return `<div>
+      <div style="height:24px;box-sizing:border-box;background:var(--accent-glow,#eef2ff);border:1px solid #ccc;border-radius:6px 6px 0 0;padding:0 12px;font-size:12.5px;font-weight:800;display:flex;justify-content:space-between;align-items:center;white-space:nowrap">
+        <span>Booked by: ${colEsc(b.user)}${b.cont ? ' (contd.)' : ''}</span>
+        <span>${b.count} ${isMain ? 'bill' : 'customer'}${b.count !== 1 ? 's' : ''}</span>
+      </div>
+      <table style="width:100%;margin:0;border-collapse:separate;border-spacing:0 3px;font-size:11px;table-layout:fixed">
+        <colgroup>${cols.map(w => `<col style="width:${w}%">`).join('')}</colgroup>
+        <thead><tr style="background:#d9d9d9 !important;color:#000 !important">
+          ${heads.map(([h, a]) => `<th style="${TH}text-align:${a}">${h}</th>`).join('')}
+        </tr></thead>
+        <tbody>${rowsHtml}${subRow}</tbody>
+      </table>
+    </div>`;
+  }
+
+  if (b.t === 'total') {
+    return `<table style="width:100%;margin:6px 0 0 0;border-collapse:collapse;font-size:12px">
+      <tr style="background:#d9d9d9 !important;color:#000 !important;height:38px">
+        <td style="padding:0 10px;font-size:13px;font-weight:900">${colEsc(b.sec.totalLabel)}</td>
+        <td style="padding:0 10px;text-align:right;font-size:18px;font-weight:900;color:#dc2626;white-space:nowrap">Rs.${b.sec.totalValue.toFixed(2)}</td>
+      </tr>
+    </table>`;
+  }
+
+  if (b.t === 'notes') {
+    return `<div style="margin-top:12px;font-size:10px;line-height:1.4;color:#555;border:1px solid #e5e7eb;border-radius:6px;padding:6px 10px;background:#fefce8">
+      ⚠ The collection table lists what is still to be collected on every bill cut in this period — cash and credit both — grouped by the user who booked it.
+      Payments already received are deducted, so a part-paid bill shows only its remaining amount.
+      Once a bill is physically collected, process that payment against the customer's account in the app so it is marked received.
+      ${b.showPrev ? '<br>The Previous Balance table is for reference only: one row per customer billed in this period who still owes a previous balance (customers with nothing previous are not listed), showing what they owed before their first bill of the period.' : ''}
+    </div>`;
+  }
+  return '';
+}
+
+async function printCollectionSheet() {
+  // Always print from FRESH data: a payment recorded a moment ago with "+ Pay"
+  // must already be reflected, not whatever was loaded when the page opened.
+  try {
+    const fresh = await SalesAPI.list({ page_size: 2000 });
+    _colSalesCache = (fresh.results || fresh).filter(b => !['cancelled', 'returned'].includes(b.status));
+  } catch (_) { /* offline: fall back to what is already loaded */ }
+  const cf = getCollectionFilters();
+  const todayLabel = cf.label;
+  const now = new Date().toLocaleString('en-PK');
+
+  const s = (typeof _companySettingsCache !== 'undefined' && _companySettingsCache) || {};
+  const storeName = s.company_name || 'SmartRetail Store';
+  const logoDataUrl = s.logo || '';
+  const logoBlock = logoDataUrl
+    ? `<img src="${logoDataUrl}" style="max-width:44px;max-height:30px;object-fit:contain;vertical-align:middle;margin-right:8px">`
+    : `<span style="font-size:22px;line-height:1;vertical-align:middle;margin-right:6px">🏪</span>`;
+
+  // Every bill cut in the period the Collection screen is CURRENTLY
+  // filtered to (whatever date/range the user picked there) — cash or
+  // credit both, grouped by the username who booked it. This used to be
+  // hardcoded to the real calendar date, so filtering the screen to
+  // yesterday and printing still said "No bills cut today" because it
+  // never looked at yesterday's bills at all. There's no more special
+  // "today" case: no filter picked just falls back to today by default
+  // (see getCollectionFilters), same as before, but any date the user
+  // filters to is what gets printed.
+  let todaySales = _colSalesCache.filter(b => {
+    const ts = b.created_at || '';
+    if (cf.dateFromDT && ts < cf.dateFromDT) return false;
+    if (cf.dateToDT   && ts > cf.dateToDT)   return false;
+    return true;
+  });
+
+  // Respect the same username filter used on the Collection page itself —
+  // if the user has typed something in there, print ONLY that user's
+  // section (their own page), instead of always dumping every user onto
+  // one sheet regardless of the filter.
+  const usernameFilter = (document.getElementById('col-username-filter')?.value || '').toLowerCase().trim();
+  if (usernameFilter) {
+    todaySales = todaySales.filter(b => (b.served_by_name || '').toLowerCase().includes(usernameFilter));
+  }
+
+  if (!todaySales.length) {
+    toast(usernameFilter ? `No bills cut on ${todayLabel} by "${usernameFilter}".` : `No bills cut on ${todayLabel}.`, 'success');
+    return;
+  }
+
+  const showPrev = colPrintPrevOn();
+  const num = v => Number(v) || 0;
+  const r2 = v => Math.round(v * 100) / 100;
+
+  // ── Part 1: the normal collection sheet (per username) ──────────────────
+  const groups = {};
+  todaySales.forEach(b => {
+    const username = b.served_by_name || 'Unassigned';
+    if (!groups[username]) groups[username] = [];
+    const billTotal = num(b.total_amount);
+    const paid = num(b.paid_amount);
+    // What is STILL to be collected on this bill: bill amount minus every
+    // payment already received against it. Never negative.
+    const total = Math.max(0, r2(billTotal - paid));
+    // Cash bookings are no longer auto-paid, so read the booked mode from
+    // is_credit rather than payment_status.
+    groups[username].push({
+      invoice: b.invoice_number,
+      customer: b.customer_name || 'Walk-in',
+      mode: b.is_credit ? 'Credit' : 'Cash',
+      total, billTotal, paid,
+    });
+  });
+  const usernames = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+  const grandTotal = todaySales.reduce((s, b) => s + Math.max(0, r2(num(b.total_amount) - num(b.paid_amount))), 0);
+
+  const sections = [{
+    kind: 'main',
+    totalLabel: `TOTAL COLLECTION EXPECTED — ${usernameFilter ? usernames[0].toUpperCase() : 'ALL USERS'}`,
+    totalValue: grandTotal,
+    groups: usernames.map(u => ({
+      username: u, rows: groups[u],
+      subTotal: groups[u].reduce((s, r) => s + r.total, 0),
+    })),
+  }];
+
+  // ── Part 2: Previous Balance table (only when the toggle is ON) ─────────
+  // One row per customer billed in this period who actually has a previous
+  // balance pending (customers with Rs.0.00 previous balance are NOT listed).
+  // A customer's EARLIEST bill in
+  // the period carries exactly what they owed before it (live), so that is the
+  // figure used — same rule as the "Previous Balance Pending" card — which also
+  // avoids double-counting customers who got several bills.
+  if (showPrev) {
+    const first = new Map(), billCount = new Map();
+    todaySales.forEach(b => {
+      // Walk-in bills have no customer ledger, so each one is its own row
+      // (previous balance Rs.0.00) instead of being dropped from the table.
+      const key = b.customer || ('walkin-' + b.id);
+      billCount.set(key, (billCount.get(key) || 0) + 1);
+      const cur = first.get(key);
+      const k1 = b.created_at || '', k0 = cur ? (cur.created_at || '') : '';
+      if (!cur || k1 < k0 || (k1 === k0 && b.id < cur.id)) first.set(key, b);
+    });
+    const pg = {};
+    let prevRowCount = 0;
+    first.forEach((b, custId) => {
+      // Only customers who really owe a previous balance appear in this table.
+      if (r2(num(b.previous_balance)) <= 0.009) return;
+      prevRowCount++;
+      const u = b.served_by_name || 'Unassigned';
+      (pg[u] = pg[u] || []).push({
+        invoice: b.invoice_number,
+        customer: b.customer_name || 'Walk-in',
+        bills: billCount.get(custId) || 1,
+        prevBal: r2(num(b.previous_balance)),
+      });
+    });
+    const pUsers = Object.keys(pg).sort((a, b) => a.localeCompare(b));
+    pUsers.forEach(u => pg[u].sort((a, b) => a.customer.localeCompare(b.customer)));
+    // Advances (negative) are listed but not netted off the pending total.
+    const pendingOf = rows => rows.reduce((s, r) => s + Math.max(0, r.prevBal), 0);
+    if (pUsers.length) {
+      sections.push({
+        kind: 'prev',
+        title: 'PREVIOUS BALANCE — customers with a pending previous balance',
+        totalLabel: `TOTAL PREVIOUS BALANCE PENDING — ${usernameFilter ? usernames[0].toUpperCase() : 'ALL USERS'} (${prevRowCount} customer${prevRowCount !== 1 ? 's' : ''})`,
+        totalValue: pUsers.reduce((s, u) => s + pendingOf(pg[u]), 0),
+        groups: pUsers.map(u => ({ username: u, rows: pg[u], subTotal: pendingOf(pg[u]) })),
+      });
+    }
+  }
+
+  // ── Paginate (29 customers per page) and render one .a4-doc per page ───
+  const pages = colPaginate(sections);
+  const DOC_STYLE = 'font-family:Arial,sans-serif;color:#000;padding:6mm 12mm;min-height:0;';
+  const html = pages.map((blocks, pi) => {
+    const pageNo = `Page ${pi + 1} of ${pages.length}`;
+    const header = pi === 0
+      ? `<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #000;padding-bottom:8px;margin-bottom:8px;height:84px;box-sizing:border-box;overflow:hidden">
+          <div>
+            <div style="font-size:22px;font-weight:900;letter-spacing:-.5px;line-height:34px;white-space:nowrap">${logoBlock}${colEsc(storeName)}</div>
+            <div style="font-size:14px;font-weight:700;color:#333;margin-top:2px">Customer Collection Sheet${usernameFilter ? ` — ${colEsc(usernames[0])}` : ''}</div>
+            <div style="font-size:11px;color:#666;margin-top:2px">Period: ${colEsc(todayLabel)}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:11px;color:#555">Booked by ${usernames.length} user${usernames.length !== 1 ? 's' : ''} in this period</div>
+            <div style="font-size:11px;color:#555;margin-top:4px">Total bills: <strong>${todaySales.length}</strong></div>
+            <div style="font-size:11px;color:#555;margin-top:4px">${pageNo}</div>
+          </div>
+        </div>`
+      : `<div style="height:26px;margin-bottom:6px;border-bottom:1px solid #999;display:flex;justify-content:space-between;align-items:center;font-size:11px;font-weight:700;color:#444;box-sizing:content-box">
+          <span>${colEsc(storeName)} — Customer Collection Sheet — ${colEsc(todayLabel)}</span><span>${pageNo}</span>
+        </div>`;
+    const body = blocks.map(b => {
+      if (b.t === 'notes') b.showPrev = showPrev;
+      return colBlockHtml(b);
+    }).join('');
+    const foot = blocks.some(b => b.t === 'notes')
+      ? `<div style="margin-top:8px;font-size:10px;color:#888;border-top:1px solid #e5e7eb;padding-top:6px;display:flex;justify-content:space-between">
+          <span>${colEsc(storeName)} — Customer Collection Sheet</span>
+          <span>Printed: ${now} by ${colEsc(currentUser?.full_name || 'Admin')}</span>
+        </div>` : '';
+    return `<div class="a4-doc" style="${DOC_STYLE}">${header}${body}${foot}</div>`;
+  }).join('');
+
+  const pa = document.getElementById('print-area');
+  pa.innerHTML = html;
+  await animatedPrint('cash', pa);
+  setTimeout(() => { pa.style.display = 'none'; }, 1400);
+}
+
+async function printCollectionReport() {
+  // Print exactly what the Collection screen is currently filtered to
+  // (date/period, search, username, Has Pending / Cleared / Overdue) —
+  // was ignoring every filter and always dumping every single customer.
+  const cf = getCollectionFilters();
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const rows = [];
+
+  if (cf.viewMode === 'username' && cf.usernameQ) {
+    // Mirrors the username-view table on screen.
+    let uRows = getUsernameCollectionRows(cf.usernameQ, cf.dateFromDT, cf.dateToDT);
+    uRows = uRows.filter(r => {
+      if (cf.balFilter === 'pending') return r.pending > 0.009;
+      if (cf.balFilter === 'clear')   return r.pending <= 0.009;
+      if (cf.balFilter === 'overdue') return r.pending > 0.009 && r.customerId && getLastPaymentDate(r.customerId) < thirtyDaysAgo;
+      return true;
+    });
+    uRows.forEach(r => rows.push({
+      name: r.customerName, phone: '—', acct: r.accountNo,
+      totalOrders: r.totalBill, payments: r.received || 0,
+      balance: Math.max(0, r.pending),
+      lastPay: r.customerId ? getLastPaymentDate(r.customerId) : '—',
+    }));
+  } else {
+    _colCustomerCache.forEach(c => {
+      const bal = getCustomerBalance(c.id, cf.dateFromDT, cf.dateToDT);
+      const lastPay = getLastPaymentDate(c.id);
+      const led = _colBalances[c.id];
+      const balance = Math.max(0, led ? Number(led.remaining) : (bal.totalOrders - bal.payments));
+      const payments = (led && !(cf.dateFromDT || cf.dateToDT)) ? Number(led.total_paid) : bal.payments;
+      if (cf.q && !(c.name||'').toLowerCase().includes(cf.q) && !(c.phone||'').toLowerCase().includes(cf.q) && !(c.accountNo||'').toLowerCase().includes(cf.q)) return;
+      if (cf.usernameQ) {
+        const hasBk = _custBookings(c.id).some(b => (b.served_by_name||'').toLowerCase().includes(cf.usernameQ));
+        if (!hasBk) return;
+      }
+      if (cf.balFilter === 'pending' && balance <= 0) return;
+      if (cf.balFilter === 'clear'   && balance > 0) return;
+      if (cf.balFilter === 'overdue' && (lastPay > thirtyDaysAgo || balance <= 0)) return;
+      rows.push({
+        name:        c.name,
+        phone:       c.phone || '—',
+        acct:        c.accountNo || '—',
+        totalOrders: bal.totalOrders,
+        payments,
+        balance,
+        lastPay,
+      });
+    });
+  }
+
+  // Sort: outstanding first, then cleared
+  rows.sort((a, b) => b.balance - a.balance);
+
+  // Grand totals
+  const grandTotalOrders   = rows.reduce((s, r) => s + r.totalOrders,  0);
+  const grandTotalReceived = rows.reduce((s, r) => s + r.payments,     0);
+  const grandTotalPending  = rows.reduce((s, r) => s + r.balance,      0);
+  const pendingCount       = rows.filter(r => r.balance > 0).length;
+  const clearedCount       = rows.filter(r => r.balance <= 0).length;
+  const today = new Date().toLocaleDateString('en-PK');
+  const now   = new Date().toLocaleString('en-PK');
+
+  const html = `<div class="a4-doc" style="font-family:Arial,sans-serif;color:#000">
+
+    <!-- Header -->
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #000;padding-bottom:10px;margin-bottom:14px">
+      <div>
+        <div style="font-size:22px;font-weight:900;letter-spacing:-.5px">🏪 SmartRetail ERP</div>
+        <div style="font-size:14px;font-weight:700;color:#333;margin-top:2px">Customer Collection Report</div>
+        <div style="font-size:11px;color:#666;margin-top:2px">Period: ${cf.label} &nbsp;|&nbsp; Printed: ${now}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:11px;color:#555">Printed by: <strong>${currentUser?.full_name||'Admin'}</strong></div>
+        <div style="font-size:11px;color:#555;margin-top:2px">Total Accounts: <strong>${rows.length}</strong></div>
+      </div>
+    </div>
+
+    <!-- Summary Banner -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">
+      <div style="padding:10px 12px;background:#f0f9ff;border:1.5px solid #bae6fd;border-radius:7px;text-align:center">
+        <div style="font-size:10px;font-weight:700;color:#0369a1;text-transform:uppercase;margin-bottom:3px">Total Billed</div>
+        <div style="font-size:18px;font-weight:900;color:#0369a1">Rs.${grandTotalOrders.toFixed(2)}</div>
+      </div>
+      <div style="padding:10px 12px;background:#f0fdf4;border:1.5px solid #86efac;border-radius:7px;text-align:center">
+        <div style="font-size:10px;font-weight:700;color:#15803d;text-transform:uppercase;margin-bottom:3px">Total Received</div>
+        <div style="font-size:18px;font-weight:900;color:#15803d">Rs.${grandTotalReceived.toFixed(2)}</div>
+      </div>
+      <div style="padding:10px 12px;background:#fef2f2;border:1.5px solid #fca5a5;border-radius:7px;text-align:center">
+        <div style="font-size:10px;font-weight:700;color:#dc2626;text-transform:uppercase;margin-bottom:3px">Total Pending</div>
+        <div style="font-size:18px;font-weight:900;color:#dc2626">Rs.${grandTotalPending.toFixed(2)}</div>
+      </div>
+      <div style="padding:10px 12px;background:#fefce8;border:1.5px solid #fde047;border-radius:7px;text-align:center">
+        <div style="font-size:10px;font-weight:700;color:#a16207;text-transform:uppercase;margin-bottom:3px">Pending / Cleared</div>
+        <div style="font-size:15px;font-weight:900;color:#a16207">${pendingCount} / ${clearedCount}</div>
+      </div>
+    </div>
+
+    <!-- Customer Table -->
+    <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+      <thead>
+        <tr style="background:#d9d9d9 !important;color:#000 !important">
+          <th style="padding:8px 10px;text-align:left">#</th>
+          <th style="padding:8px 10px;text-align:left">Customer</th>
+          <th style="padding:8px 10px;text-align:left">Phone</th>
+          <th style="padding:8px 10px;text-align:left">Account</th>
+          <th style="padding:8px 10px;text-align:right">Total Billed</th>
+          <th style="padding:8px 10px;text-align:right">Received</th>
+          <th style="padding:8px 10px;text-align:right">Balance Due</th>
+          <th style="padding:8px 10px;text-align:center">Status</th>
+          <th style="padding:8px 10px;text-align:center">Last Payment</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((r, i) => `
+        <tr style="background:${i%2?'#f8f8f8':'#fff'};border-bottom:1px solid #e5e7eb">
+          <td style="padding:7px 10px;color:#666">${i+1}</td>
+          <td style="padding:7px 10px;font-weight:700">${r.name}</td>
+          <td style="padding:7px 10px">${r.phone}</td>
+          <td style="padding:7px 10px;font-family:monospace;font-size:10.5px">${r.acct}</td>
+          <td style="padding:7px 10px;text-align:right">Rs.${r.totalOrders.toFixed(2)}</td>
+          <td style="padding:7px 10px;text-align:right;color:#15803d;font-weight:700">Rs.${r.payments.toFixed(2)}</td>
+          <td style="padding:7px 10px;text-align:right;font-weight:800;color:${r.balance>0?'#dc2626':'#15803d'}">Rs.${r.balance.toFixed(2)}</td>
+          <td style="padding:7px 10px;text-align:center">
+            <span style="padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;background:${r.balance<=0?'#dcfce7':'#fee2e2'};color:${r.balance<=0?'#15803d':'#dc2626'}">
+              ${r.balance<=0?'✅ Cleared':'⚠ Pending'}
+            </span>
+          </td>
+          <td style="padding:7px 10px;text-align:center;font-size:10.5px;color:#555">${r.lastPay}</td>
+        </tr>`).join('')}
+      </tbody>
+
+      <!-- ═══ GRAND TOTALS FOOTER ═══ -->
+      <tfoot>
+        <tr style="background:#f1f5f9;border-top:2px solid #94a3b8">
+          <td colspan="4" style="padding:9px 10px;font-size:12px;font-weight:700;color:#334155;text-transform:uppercase;letter-spacing:.04em">Sub-Totals</td>
+          <td style="padding:9px 10px;text-align:right;font-weight:800;color:#c65a3f">Rs.${grandTotalOrders.toFixed(2)}</td>
+          <td style="padding:9px 10px;text-align:right;font-weight:800;color:#15803d">Rs.${grandTotalReceived.toFixed(2)}</td>
+          <td style="padding:9px 10px;text-align:right;font-weight:800;color:#dc2626">Rs.${grandTotalPending.toFixed(2)}</td>
+          <td colspan="2"></td>
+        </tr>
+        <tr style="background:#d9d9d9 !important;color:#000 !important">
+          <td colspan="4" style="padding:11px 10px;font-size:13px;font-weight:900;letter-spacing:.03em">
+            💰 TOTAL TO RECEIVE (Pending Collection)
+          </td>
+          <td colspan="2" style="padding:11px 10px;text-align:right;font-size:11px;color:#94a3b8">
+            Received: Rs.${grandTotalReceived.toFixed(2)}
+          </td>
+          <td style="padding:11px 10px;text-align:right;font-size:18px;font-weight:900;color:#f87171">
+            Rs.${grandTotalPending.toFixed(2)}
+          </td>
+          <td colspan="2" style="padding:11px 10px;text-align:center;font-size:11px;color:#94a3b8">
+            ${pendingCount} account${pendingCount!==1?'s':''} pending
+          </td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <div style="margin-top:12px;font-size:10px;color:#888;border-top:1px solid #e5e7eb;padding-top:8px;display:flex;justify-content:space-between">
+      <span>SmartRetail ERP — Customer Collection Report</span>
+      <span>Printed: ${now} by ${currentUser?.full_name||'Admin'}</span>
+    </div>
+  </div>`;
+
+  const pa = document.getElementById('print-area');
+  pa.innerHTML = html;
+  await animatedPrint('cash', pa);
+  setTimeout(() => { pa.style.display = 'none'; }, 1400);
+}
+
+async function printUsernameCollection(username) {
+  const rows = getUsernameCollectionRows(username);
+  const grandTotal = rows.reduce((s,r)=>s+r.totalCollection,0);
+  const grandPending = rows.reduce((s,r)=>s+r.pending,0);
+  const html = `<div class="a4-doc">
+    <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:12px">
+      <div><div style="font-size:20px;font-weight:900">🏪 SmartRetail ERP</div>
+      <div style="font-size:13px;font-weight:700;color:#555">Collection Sheet — Username: ${username}</div>
+      <div style="font-size:11px;color:#888">${new Date().toLocaleDateString()}</div></div>
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr>${['Customer','Account','Invoices','Total Bill','Tax','Disc.','Received','Pending'].map(h=>`<th style="padding:8px;background:#d9d9d9 !important;color:#000 !important;text-align:left">${h}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map((r,i)=>`<tr style="background:${i%2?'#f8f8f8':'#fff'}">
+        <td style="padding:7px 8px;font-weight:700">${r.customerName}</td>
+        <td style="padding:7px 8px;font-family:monospace">${r.accountNo}</td>
+        <td style="padding:7px 8px;text-align:center">${r.invoiceCount}</td>
+        <td style="padding:7px 8px;font-weight:700">Rs.${r.totalBill.toFixed(2)}</td>
+        <td style="padding:7px 8px;color:#d97706">${r.taxAmt>0?'Rs.'+r.taxAmt.toFixed(2):'—'}</td>
+        <td style="padding:7px 8px;color:#16a34a">${r.discAmt>0?'Rs.'+r.discAmt.toFixed(2):'—'}</td>
+        <td style="padding:7px 8px;color:#16a34a;font-weight:700">Rs.${(r.received||0).toFixed(2)}</td>
+        <td style="padding:7px 8px;color:${r.pending>0?'#dc2626':'#16a34a'};font-weight:800">Rs.${r.pending.toFixed(2)}</td>
+      </tr>`).join('')}</tbody>
+      <tfoot><tr style="background:#d9d9d9 !important;color:#000 !important">
+        <td colspan="3" style="padding:8px;font-weight:700">TOTALS</td>
+        <td style="padding:8px;font-weight:900">Rs.${grandTotal.toFixed(2)}</td>
+        <td colspan="2" style="padding:8px"></td>
+        <td style="padding:8px;font-weight:900">Rs.${(grandTotal-grandPending).toFixed(2)}</td>
+        <td style="padding:8px;font-weight:900;color:#ef4444">Rs.${grandPending.toFixed(2)}</td>
+      </tr></tfoot>
+    </table>
+  </div>`;
+  const pa=document.getElementById('print-area');
+  pa.innerHTML=html;
+  await animatedPrint('cash', pa);
+  setTimeout(()=>{ pa.style.display='none'; },1200);
+}
+
+function exportCollectionReport() {
+  const rows=DB.customers.map(c=>{
+    const bal=getCustomerBalance(c.id);
+    return [c.name,c.phone||'',c.accountNo||'',bal.totalOrders.toFixed(2),bal.payments.toFixed(2),Math.max(0,bal.totalOrders-bal.payments).toFixed(2),getLastPaymentDate(c.id)];
+  });
+  const headers=['Customer','Phone','Account No','Total Orders','Payments Received','Balance Due','Last Payment'];
+  const csv=[headers,...rows].map(r=>r.map(v=>`"${v}"`).join(',')).join('\n');
+  const blob=new Blob([csv],{type:'text/csv'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='collection-report-'+new Date().toISOString().split('T')[0]+'.csv';
+  a.click(); URL.revokeObjectURL(a.href);
+  toast('Collection report exported!','success');
+}
+
+// ── Patch navigate() to handle collection page ────────
+const _origNavigateV2 = window.navigate;
+window.navigate = function(page) {
+  if (_origNavigateV2) _origNavigateV2(page);
+  if (page === 'collection') {
+    const today = new Date().toISOString().split('T')[0];
+    const dfEl = document.getElementById('col-date-from');
+    const dtEl = document.getElementById('col-date-to');
+    if (dfEl && !dfEl.value) dfEl.value = new Date(Date.now()-7*24*60*60*1000).toISOString().split('T')[0];
+    if (dtEl && !dtEl.value) dtEl.value = today;
+    wireModernDateTimeInputs();
+    syncDtDisplay('col-date-from'); syncDtDisplay('col-date-to');
+    syncDtDisplay('col-time-from'); syncDtDisplay('col-time-to');
+    renderCollection();
+  }
+};
+
+// ── Inject all modals + collection page DOM ───────────
+document.addEventListener('DOMContentLoaded', function() {
+
+  // 1. Sale Slip Settings Modal
+  const ssModal = document.createElement('div');
+  ssModal.innerHTML = `
+  <div class="modal-overlay" id="ss-settings-modal">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-header">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:36px;height:36px;border-radius:8px;background:var(--purple-glow);display:flex;align-items:center;justify-content:center;color:var(--purple)"><i class="fa fa-sliders-h"></i></div>
+          <div>
+            <div class="modal-title">Sale Slip Settings</div>
+            <div style="font-size:11px;color:var(--text-muted)">Customize what prints on sale slips & displays in the list</div>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeModal('ss-settings-modal')">✕</button>
+      </div>
+      <div class="modal-body" style="max-height:70vh;overflow-y:auto">
+        <div style="margin-bottom:16px;padding:12px 14px;background:var(--bg-secondary);border-radius:8px;border:1px solid var(--border)">
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin-bottom:8px">
+            <i class="fa fa-text-height" style="color:var(--accent)"></i> Invoice Font Size
+          </label>
+          <select class="form-input" id="ss-font-scale" style="padding:9px 12px">
+            <option value="0.9" ${ssSettings.fontScale===0.9?'selected':''}>Small</option>
+            <option value="1" ${ssSettings.fontScale===1?'selected':''}>Normal (original)</option>
+            <option value="1.15" ${ssSettings.fontScale===1.15?'selected':''}>Large</option>
+            <option value="1.3" ${ssSettings.fontScale===1.3?'selected':''}>Extra Large</option>
+            <option value="1.45" ${ssSettings.fontScale===1.45?'selected':''}>Huge</option>
+          </select>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Scales all text, headers and totals on the printed A4 slip together — change it here any time, no code edits needed.</div>
+        </div>
+        <div style="margin-bottom:16px;padding:12px 14px;background:var(--bg-secondary);border-radius:8px;border:1px solid var(--border)">
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin-bottom:8px">
+            <i class="fa fa-font" style="color:var(--accent)"></i> Product Name Font Size
+          </label>
+          <select class="form-input" id="ss-product-name-font-scale" style="padding:9px 12px">
+            <option value="1" ${ssSettings.productNameFontScale===1?'selected':''}>Normal (original)</option>
+            <option value="1.3" ${ssSettings.productNameFontScale===1.3?'selected':''}>Large</option>
+            <option value="1.5" ${ssSettings.productNameFontScale===1.5?'selected':''}>Extra Large</option>
+            <option value="1.75" ${ssSettings.productNameFontScale===1.75?'selected':''}>Huge</option>
+            <option value="2" ${ssSettings.productNameFontScale===2?'selected':''}>Maximum</option>
+          </select>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Only enlarges the product name text inside the items table — everything else on the slip stays the same size.</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          ${[
+            ['showCustomerDetails','Customer Details','fa-user'],
+            ['showSubtotal','Base Amount','fa-calculator'],
+            ['showTax','Sale Tax / GST','fa-percent'],
+            ['showTaxAmount','Tax Amount','fa-money-bill-wave'],
+            ['showDiscount','Discount Amount','fa-tag'],
+            ['showCartonPrice','Carton Price','fa-boxes'],
+            ['showProfit','Profit Info','fa-chart-line'],
+            ['showCompanyLogo','Company Logo / Header','fa-store'],
+            ['showFooterNotes','Footer Notes','fa-sticky-note'],
+            ['showBookedBy','Booked By (Username)','fa-user-tag'],
+            ['showPaymentMethod','Payment Method','fa-credit-card'],
+          ].map(([key, label, icon]) => makeSettingToggle(key, label, icon, ssSettings[key])).join('')}
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('ss-settings-modal')">Cancel</button>
+        <button class="btn btn-accent" onclick="saveSsSettings()"><i class="fa fa-save"></i> Save Settings</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(ssModal.firstElementChild);
+
+  // 1b. Summary Sheet Settings Modal (for Sale Slips → Print Summary Sheet)
+  const sssModal = document.createElement('div');
+  sssModal.innerHTML = `
+  <div class="modal-overlay" id="sss-settings-modal">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-header">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:36px;height:36px;border-radius:8px;background:var(--purple-glow);display:flex;align-items:center;justify-content:center;color:var(--purple)"><i class="fa fa-file-alt"></i></div>
+          <div>
+            <div class="modal-title">Summary Sheet Settings</div>
+            <div style="font-size:11px;color:var(--text-muted)">Customize columns on the printed daily order summary</div>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeModal('sss-settings-modal')">✕</button>
+      </div>
+      <div class="modal-body" style="max-height:70vh;overflow-y:auto">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          ${[
+            ['showAccountNo','Account No','fa-hashtag'],
+            ['showItems','Items Count','fa-boxes'],
+            ['showBillAmt','Bill Amount','fa-money-bill-wave'],
+            ['showPrevBalance','Previous Balance','fa-history'],
+            ['showNetPayable','Net Payable','fa-calculator'],
+            ['showPaymentMethod','Payment Method','fa-credit-card'],
+          ].map(([key, label, icon]) => makeSssSettingToggle(key, label, icon, sssSettings[key])).join('')}
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('sss-settings-modal')">Cancel</button>
+        <button class="btn btn-accent" onclick="saveSssSettings()"><i class="fa fa-save"></i> Save Settings</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(sssModal.firstElementChild);
+
+  // 2. Order Summary Settings Modal — fully rebuilt with working toggles
+  const osModal = document.createElement('div');
+
+  function _osToggleRow(key, label, icon) {
+    const on = osSettings[key] !== false;
+    return `<label style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--bg-secondary);border-radius:8px;cursor:pointer;border:1px solid var(--border);gap:8px"
+      onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+      <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
+        <div style="width:28px;height:28px;flex-shrink:0;border-radius:6px;background:var(--accent-glow);display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:11px"><i class="fa ${icon}"></i></div>
+        <span style="font-size:13px;font-weight:600">${label}</span>
+      </div>
+      <div style="position:relative;width:42px;height:24px;flex-shrink:0" onclick="event.preventDefault();osToggle('${key}',this)">
+        <div class="os-toggle-bg" style="position:absolute;inset:0;border-radius:12px;background:${on?'var(--accent)':'var(--border)'};transition:background .2s;cursor:pointer"></div>
+        <div class="os-toggle-dot" style="position:absolute;top:2px;left:${on?'20px':'2px'};width:20px;height:20px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.35);pointer-events:none"></div>
+        <input type="checkbox" class="os-setting-check" data-key="${key}" ${on?'checked':''} style="opacity:0;width:0;height:0;position:absolute;pointer-events:none">
+      </div>
+    </label>`;
+  }
+
+  osModal.innerHTML = `
+  <div class="modal-overlay" id="os-settings-modal">
+    <div class="modal" style="max-width:540px">
+      <div class="modal-header">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:36px;height:36px;border-radius:8px;background:var(--accent-glow);display:flex;align-items:center;justify-content:center;color:var(--accent)"><i class="fa fa-sliders-h"></i></div>
+          <div>
+            <div class="modal-title">Order Summary Settings</div>
+            <div style="font-size:11px;color:var(--text-muted)">Toggle which panels and columns are visible</div>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeModal('os-settings-modal')">✕</button>
+      </div>
+      <div class="modal-body" style="max-height:72vh;overflow-y:auto">
+
+        <!-- Section A: Financial KPI Cards -->
+        <div style="font-size:10px;font-weight:800;color:var(--accent);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;display:flex;align-items:center;gap:6px">
+          <i class="fa fa-chart-bar"></i> Financial Summary Cards (top strip)
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:18px">
+          ${_osToggleRow('finShowOrders',   'Total Orders Card',   'fa-receipt')}
+          ${_osToggleRow('finShowAmount',   'Total Amount Card',   'fa-dollar-sign')}
+          ${_osToggleRow('finShowTax',      'Tax Card',            'fa-percent')}
+          ${_osToggleRow('finShowDiscount', 'Discount Card',       'fa-tag')}
+          ${_osToggleRow('finShowPending',  'Pending Balance Card','fa-clock')}
+          ${_osToggleRow('finShowReceived', 'Received Card',       'fa-check-circle')}
+        </div>
+
+        <!-- Section B: Dispatch Table Columns -->
+        <div style="font-size:10px;font-weight:800;color:var(--accent);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;display:flex;align-items:center;gap:6px">
+          <i class="fa fa-table"></i> Dispatch Table Columns
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          ${_osToggleRow('showSku',        'SKU Column',           'fa-barcode')}
+          ${_osToggleRow('showOrders',     'Orders Count Column',  'fa-receipt')}
+          ${_osToggleRow('showPieces',     'Total Pieces Column',  'fa-cube')}
+          ${_osToggleRow('showPcsPerCtn',  'Pieces / Carton Column','fa-boxes')}
+          ${_osToggleRow('showCartonsOut', 'Cartons Out Column',   'fa-dolly')}
+          ${_osToggleRow('showLoosePcs',   'Loose Pieces Column',  'fa-hashtag')}
+          ${_osToggleRow('showUnitCost',   'Unit Cost Column',     'fa-dollar-sign')}
+          ${_osToggleRow('showTotalCost',  'Total Cost Column',    'fa-chart-line')}
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('os-settings-modal')">Cancel</button>
+        <button class="btn btn-accent" onclick="saveOsSettings()"><i class="fa fa-save"></i> Save Settings</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(osModal.firstElementChild);
+
+  // 3. Record Payment Modal
+  const payModal = document.createElement('div');
+  payModal.innerHTML = `
+  <div class="modal-overlay" id="col-payment-modal">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header">
+        <div class="modal-title">💳 Record Payment</div>
+        <button class="modal-close" onclick="closeModal('col-payment-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="col-pay-cust-id">
+        <div class="form-group-inline"><label>Customer</label><input class="form-input" id="col-pay-cust-name" readonly style="background:var(--bg-secondary)"></div>
+        <div class="form-group-inline"><label>Apply Payment To (Bill) *</label><select class="form-input" id="col-pay-sale" onchange="onColPaySaleChange()" style="padding:9px 12px;font-weight:700"></select></div>
+        <div class="form-row">
+          <div class="form-group-inline"><label>Bill Balance Due</label><input class="form-input" id="col-pay-outstanding" readonly style="background:var(--bg-secondary);color:var(--red);font-weight:700;font-family:var(--mono)"></div>
+          <div class="form-group-inline"><label>Payment Amount *</label><input class="form-input" type="number" id="col-pay-amount" placeholder="0.00" step="0.01" min="0" oninput="calcColRemaining()"><div id="col-pay-error" style="display:none;color:var(--red);font-size:11px;font-weight:600;margin-top:4px"></div></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group-inline"><label>Payment Date</label><input class="form-input" type="date" id="col-pay-date"></div>
+          <div class="form-group-inline"><label>Method</label>
+            <select class="form-input" id="col-pay-method"><option value="cash">Cash</option><option value="card">Card</option><option value="bank_transfer">Bank Transfer</option><option value="mobile_wallet">Mobile Wallet</option><option value="other">Other</option></select>
+          </div>
+        </div>
+        <div class="form-group-inline"><label>Notes</label><input class="form-input" id="col-pay-notes" placeholder="Optional notes..."></div>
+        <div style="background:var(--green-glow);border:1px solid rgba(16,185,129,.2);border-radius:8px;padding:10px;display:flex;justify-content:space-between;font-weight:700">
+          <span>Remaining After Payment:</span>
+          <span id="col-pay-remaining" style="color:var(--green);font-size:16px;font-family:var(--mono)">Rs.0.00</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('col-payment-modal')">Cancel</button>
+        <button class="btn btn-green" id="col-pay-save" onclick="saveCollectionPayment()" disabled style="opacity:.5;cursor:not-allowed"><i class="fa fa-check"></i> Record Payment</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(payModal.firstElementChild);
+
+  // 4. Customer Collection Page
+  const contentDiv = document.querySelector('.content');
+  if (!contentDiv) return;
+  const existingCol = document.getElementById('page-collection');
+  if (existingCol) existingCol.remove(); // remove stale version if re-init
+  const colPage = document.createElement('div');
+  colPage.className = 'page'; colPage.id = 'page-collection';
+  colPage.innerHTML = `
+    <div class="page-header">
+      <div class="page-header-left">
+        <h2>Customer Collection</h2>
+        <p>Track payments, balances, and collection activity by customer or username</p>
+      </div>
+      <div class="page-header-actions">
+        <button class="btn btn-ghost btn-sm" onclick="exportCollectionReport()"><i class="fa fa-file-csv"></i> Export CSV</button>
+        <button class="btn btn-warning btn-sm" onclick="printCollectionSheet()" title="Prints the period, username and balance filters currently applied above"><i class="fa fa-hand-holding-usd"></i> Print Collection</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="col-prev-toggle" aria-pressed="${colPrintPrevOn()}" onclick="colTogglePrev(this)" title="ON: below the collection total, prints a separate Previous Balance table (customers billed in the period) with its own total" style="display:inline-flex;align-items:center;gap:8px">
+          <span>Prev Balance</span>
+          <span style="position:relative;width:36px;height:20px;display:inline-block;flex-shrink:0">
+            <span class="col-prev-bg" style="position:absolute;inset:0;border-radius:10px;background:${colPrintPrevOn() ? 'var(--accent)' : 'var(--border)'};transition:background .2s"></span>
+            <span class="col-prev-dot" style="position:absolute;top:2px;left:${colPrintPrevOn() ? '18px' : '2px'};width:16px;height:16px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.35)"></span>
+          </span>
+        </button>
+        <button class="btn btn-accent btn-sm" onclick="printCollectionReport()"><i class="fa fa-print"></i> Print Report</button>
+      </div>
+    </div>
+
+    <!-- KPIs -->
+    <div class="stat-grid col-kpi-row" style="margin-bottom:16px">
+      <div class="stat-card blue"><div class="stat-header"><div class="stat-icon blue"><i class="fa fa-users"></i></div></div><div class="stat-value" id="col-total-customers">0</div><div class="stat-label">Total Accounts</div></div>
+      <div class="stat-card red"><div class="stat-header"><div class="stat-icon red"><i class="fa fa-exclamation-circle"></i></div></div><div class="stat-value" id="col-total-pending">Rs.0</div><div class="stat-label">Total Pending</div></div>
+      <div class="stat-card green"><div class="stat-header"><div class="stat-icon green"><i class="fa fa-check-circle"></i></div></div><div class="stat-value" id="col-total-received">Rs.0</div><div class="stat-label">Received Today</div></div>
+      <div class="stat-card yellow"><div class="stat-header"><div class="stat-icon yellow"><i class="fa fa-clock"></i></div></div><div class="stat-value" id="col-overdue-count">0</div><div class="stat-label">Overdue Accounts</div></div>
+    </div>
+
+    <!-- Today's bills: previous balance still pending / received today -->
+    <div class="stat-card purple col-prev-card" id="col-prev-card" style="margin-bottom:16px">
+      <div class="col-prev-seg">
+        <div class="stat-icon purple"><i class="fa fa-file-invoice"></i></div>
+        <div>
+          <div class="stat-value" id="col-today-bills">0</div>
+          <div class="stat-label">Bills Out Today</div>
+          <div class="col-prev-sub" id="col-today-bills-sub">&nbsp;</div>
+        </div>
+      </div>
+      <div class="col-prev-seg">
+        <div class="stat-icon red"><i class="fa fa-hourglass-half"></i></div>
+        <div>
+          <div class="stat-value" id="col-prev-pending">Rs.0</div>
+          <div class="stat-label">Previous Balance Pending (today's bills)</div>
+          <div class="col-prev-sub">still unpaid from before today</div>
+        </div>
+      </div>
+      <div class="col-prev-seg">
+        <div class="stat-icon green"><i class="fa fa-hand-holding-dollar"></i></div>
+        <div>
+          <div class="stat-value" id="col-prev-received">Rs.0</div>
+          <div class="stat-label">Previous Balance Received Today</div>
+          <div class="col-prev-sub">paid today on bills from before today</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card" id="col-filters-card" style="margin-bottom:16px">
+      <div class="card-body" style="padding:14px 20px">
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+          <div class="form-group-inline" style="margin-bottom:0;flex:1;min-width:160px">
+            <label>Search Customer</label>
+            <div class="search-bar"><i class="fa fa-search"></i>
+              <input type="text" id="col-search" placeholder="Name, phone, account..." oninput="renderCollection()" style="font-size:13px">
+            </div>
+          </div>
+          <div class="form-group-inline" style="margin-bottom:0;min-width:180px">
+            <label><i class="fa fa-user-tag" style="color:var(--accent)"></i> Filter by Username</label>
+            <div class="search-bar"><i class="fa fa-user-tag"></i>
+              <input type="text" id="col-username-filter" placeholder="e.g. admin, salesman1..." oninput="renderCollection()" style="font-size:13px">
+            </div>
+          </div>
+          <div class="form-group-inline" style="margin-bottom:0">
+            <label>View Mode</label>
+            <select class="form-input" id="col-view-mode" onchange="renderCollection()" style="padding:9px 12px;width:160px">
+              <option value="customer">By Customer</option>
+              <option value="username">By Username</option>
+            </select>
+          </div>
+          <div class="form-group-inline" style="margin-bottom:0">
+            <label><i class="fa fa-calendar-alt" style="color:var(--text-muted)"></i> From</label>
+            <div style="display:flex;gap:4px">
+              <div class="dt-picker-wrap">
+                <input type="hidden" id="col-date-from" onchange="renderCollection()">
+                <input type="text" id="col-date-from-display" class="dt-picker-input" placeholder="From date" readonly>
+              </div>
+              <div class="dt-picker-wrap">
+                <input type="hidden" id="col-time-from" onchange="renderCollection()">
+                <input type="text" id="col-time-from-display" class="dt-picker-input dt-time-input" placeholder="Time" readonly>
+              </div>
+            </div>
+          </div>
+          <div class="form-group-inline" style="margin-bottom:0">
+            <label><i class="fa fa-calendar-alt" style="color:var(--text-muted)"></i> To</label>
+            <div style="display:flex;gap:4px">
+              <div class="dt-picker-wrap">
+                <input type="hidden" id="col-date-to" onchange="renderCollection()">
+                <input type="text" id="col-date-to-display" class="dt-picker-input" placeholder="To date" readonly>
+              </div>
+              <div class="dt-picker-wrap">
+                <input type="hidden" id="col-time-to" onchange="renderCollection()">
+                <input type="text" id="col-time-to-display" class="dt-picker-input dt-time-input" placeholder="Time" readonly>
+              </div>
+            </div>
+          </div>
+          <div class="form-group-inline" style="margin-bottom:0">
+            <label>Balance Filter</label>
+            <select class="form-input" id="col-balance-filter" onchange="renderCollection()" style="padding:9px 12px;width:150px">
+              <option value="">All</option>
+              <option value="pending">Has Pending</option>
+              <option value="clear">Cleared</option>
+              <option value="overdue">Overdue (&gt;30d)</option>
+            </select>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="clearCollectionFilters()"><i class="fa fa-times"></i> Clear</button>
+          <button class="btn btn-warning btn-sm" onclick="printCollectionSheet()" title="Prints exactly the period, username and balance filters set above"><i class="fa fa-print"></i> Print (this filter)</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Table -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Collection Ledger</div>
+        <div style="font-size:12px;color:var(--text-secondary)" id="col-count-label">— accounts</div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead id="col-thead">
+            <tr><th>Customer</th><th>Account No.</th><th>Prev. Balance</th><th>Today's Orders</th><th>Total Pending</th><th>Received</th><th>Remaining</th><th>Last Payment</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="collection-tbody"></tbody>
+        </table>
+      </div>
+    </div>`;
+  contentDiv.appendChild(colPage);
+
+  // 5. Inject enhanced CSS
+  const style = document.createElement('style');
+  style.textContent = `
+    /* ── Smooth page transitions ── */
+    .page.active { animation: pageSlideIn .28s cubic-bezier(.4,0,.2,1); }
+    @keyframes pageSlideIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
+    /* ── Nav hover ── */
+    .nav-item { transition: all .18s cubic-bezier(.4,0,.2,1); }
+    .nav-item:hover { transform: translateX(2px); }
+    .nav-item i { transition: transform .18s; }
+    .nav-item:hover i, .nav-item.active i { transform: scale(1.15); }
+    /* ── Stat card hover ── */
+    .stat-card { transition: all .2s cubic-bezier(.4,0,.2,1); }
+    .stat-card:hover { transform: translateY(-3px); box-shadow: 0 12px 32px rgba(0,0,0,.45); }
+    /* ── Button effects ── */
+    .btn { transition: all .15s cubic-bezier(.4,0,.2,1); }
+    .btn-accent:hover { transform:translateY(-1px); box-shadow:0 4px 16px rgba(234,108,77,.35); }
+    .btn-green:hover  { transform:translateY(-1px); box-shadow:0 4px 16px rgba(16,185,129,.35); }
+    .btn-ghost:hover  { transform:translateY(-1px); }
+    /* ── Table row hover ── */
+    tr:hover td { background: var(--bg-card-hover) !important; transition: background .12s; }
+    /* ── Modal spring entrance ── */
+    .modal { animation: modalIn .25s cubic-bezier(.34,1.56,.64,1); }
+    @keyframes modalIn { from { opacity:0; transform:scale(.94) translateY(8px); } to { opacity:1; transform:none; } }
+    /* ── Search bar focus glow ── */
+    .search-bar:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-glow); }
+    /* ── Auto-tax row highlight in booking ── */
+    #bk-auto-tax-row { transition: opacity .2s; }
+    /* ── Booking items tax badge ── */
+    #bk-items-tbody span[title="Auto tax from product"] { animation: taxBadgePop .3s cubic-bezier(.34,1.56,.64,1); }
+    @keyframes taxBadgePop { from { transform:scale(0); } to { transform:scale(1); } }
+    /* ── Product pricing summary gradient border ── */
+    #prod-pricing-summary { background: linear-gradient(var(--bg-secondary),var(--bg-secondary)) padding-box, linear-gradient(135deg,var(--accent),var(--purple)) border-box; border:1px solid transparent; }
+    /* ── Collection page accent ── */
+    #page-collection .stat-card.blue  { border-left:3px solid var(--accent); }
+    #page-collection .stat-card.green { border-left:3px solid var(--green); }
+    #page-collection .stat-card.red   { border-left:3px solid var(--red); }
+    #page-collection .stat-card.yellow{ border-left:3px solid var(--yellow); }
+    /* ── Sale slip action buttons ── */
+    #saleslips-tbody .btn-xs { border-radius:6px; transition:all .15s; }
+    #saleslips-tbody .btn-xs:hover { transform:scale(1.08); }
+    /* ── Adj type tiles ── */
+    .adj-type-tile { user-select:none; }
+    .adj-type-tile:hover { transform:scale(1.03) !important; }
+    /* ── OS Financial KPI strip responsive ── */
+    @media (max-width:1199px) {
+      #os-financial-kpis { grid-template-columns: repeat(3,1fr); }
+    }
+    @media (max-width:767px) {
+      #os-financial-kpis { grid-template-columns: repeat(2,1fr); }
+      .os-fin-card { padding:10px 12px !important; }
+      .os-fin-card > div:last-child { font-size:17px !important; }
+    }
+    @media (max-width:480px) {
+      #os-financial-kpis { grid-template-columns: 1fr; }
+    }
+    /* ── Stock adjust search drop ── */
+    #adj-search-drop::-webkit-scrollbar { width:4px; }
+    #adj-search-drop::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
+    /* ── CNIC input monospace highlight ── */
+    #cust-cnic:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-glow); }
+    #cust-cnic.cnic-valid   { border-color:var(--green)!important; }
+    #cust-cnic.cnic-invalid { border-color:var(--red)!important; }
+    /* ── Customer table CNIC column ── */
+    #customers-table td:nth-child(5) { font-family:var(--mono); font-size:11px; letter-spacing:.03em; }
+    /* ── OS username filter dropdown ── */
+    #os-username-filter option { background:var(--bg-card); color:var(--text-primary); }
+    /* ── Adj product card animation ── */
+    #adj-product-card { animation:slideDown .2s cubic-bezier(.4,0,.2,1); }
+    @keyframes slideDown { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:none; } }
+    /* ── OS fin card hover ── */
+    .os-fin-card { transition:transform .15s,box-shadow .15s; }
+    .os-fin-card:hover { transform:translateY(-2px); box-shadow:0 6px 20px rgba(0,0,0,.3); }
+    /* ── Responsive customer modal ── */
+    @media (max-width:600px) {
+      #customer-modal .form-row { flex-direction:column; }
+      #adj-product-card > div:last-child { grid-template-columns:1fr 1fr; }
+    }
+      #page-collection .table-wrap { overflow-x:auto; }
+      #page-collection .stat-grid  { grid-template-columns:repeat(2,1fr); }
+      .page-header { flex-direction:column; align-items:flex-start; gap:10px; }
+      .page-header-actions { flex-wrap:wrap; }
+    }
+    @media (max-width:480px) {
+      #page-collection .stat-grid { grid-template-columns:1fr; }
+      .modal { width:calc(100vw - 24px); max-width:100% !important; }
+    }
+  `;
+  document.head.appendChild(style);
+});
+// NOTE: Two legacy IIFE patches that used to re-override renderSaleSlips/
+// viewSlipDetail/downloadSlipInvoice with stale DB.orderBookings-based logic
+// were removed here — the real implementations above (using _slipsCache /
+// SalesAPI) are now the only definitions, so they're no longer clobbered.
+window.clearSaleSlipsFilters = function() {
+  ['ss-date-from','ss-date-to','ss-time-from','ss-time-to','ss-status','ss-name','ss-area','ss-invoice','ss-username'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  syncDtDisplay('ss-date-from'); syncDtDisplay('ss-date-to'); syncDtDisplay('ss-time-from'); syncDtDisplay('ss-time-to');
+  renderSaleSlips();
+};
+
+// ═══════════════════════════════════════════════════════
+// SALE RETURN MODULE
+// ═══════════════════════════════════════════════════════
+let _srCurrentBooking = null;
+
+let _srInvoiceCache = [];
+
+async function renderSaleReturn() {
+  await searchSaleReturnInvoice();
+  await renderSaleReturnHistory();
+}
+
+async function searchSaleReturnInvoice() {
+  const invQ   = (document.getElementById('sr-invoice-search')?.value||'').trim();
+  const custQ  = (document.getElementById('sr-cust-search')?.value||'').trim();
+  const fromD  = document.getElementById('sr-date-from')?.value||'';
+  const toD    = document.getElementById('sr-date-to')?.value||'';
+  const tbody  = document.getElementById('sr-invoice-tbody');
+  const label  = document.getElementById('sr-results-count');
+  if (!tbody) return;
+
+  if (!invQ && !custQ && !fromD && !toD) {
+    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:32px;color:var(--text-muted)">
+      <i class="fa fa-search" style="font-size:28px;display:block;margin-bottom:8px;opacity:.3"></i>
+      Enter an invoice number, customer name, or select a date range to find invoices
+    </td></tr>`;
+    if (label) label.textContent = 'Enter filters to search';
+    return;
+  }
+
+  const params = {};
+  if (invQ) params.search = invQ;
+  else if (custQ) params.search = custQ;
+  const data = await SalesAPI.list(params);
+  let results = data.results || data;
+  if (fromD) results = results.filter(s => (s.created_at||'') >= fromD);
+  if (toD) results = results.filter(s => (s.created_at||'') <= toD + 'T23:59:59');
+  results = results.slice(0, 50);
+  _srInvoiceCache = results;
+
+  if (label) label.textContent = results.length + ' invoice' + (results.length!==1?'s':'') + ' found';
+
+  if (!results.length) {
+    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:28px;color:var(--text-muted)">
+      <i class="fa fa-file-invoice" style="font-size:28px;display:block;margin-bottom:8px;opacity:.3"></i>
+      No invoices match your search
+    </td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = results.map(b => {
+    const alreadyReturned = ['returned','partially_returned'].includes(b.status);
+    const statusClass = b.status==='completed'?'badge-green':b.status==='cancelled'?'badge-red':'badge-yellow';
+    return `<tr>
+      <td class="td-mono" style="font-weight:700">${b.invoice_number}</td>
+      <td style="font-size:12px">${(b.created_at||'').slice(0,10)}</td>
+      <td style="font-weight:600">${b.customer_name||'Walk-in'}</td>
+      <td class="td-mono" style="font-size:11px">—</td>
+      <td style="text-align:center">${b.items?.length||0}</td>
+      <td class="td-mono fw-700">Rs.${Number(b.total_amount).toFixed(2)}</td>
+      <td class="td-mono" style="color:var(--yellow)">${Number(b.tax_amount)>0?'Rs.'+Number(b.tax_amount).toFixed(2):'—'}</td>
+      <td class="td-mono" style="color:var(--green)">${Number(b.discount_amount)>0?'Rs.'+Number(b.discount_amount).toFixed(2):'—'}</td>
+      <td><span class="badge ${statusClass}">${b.status.replace(/_/g,' ')}</span>
+          ${alreadyReturned?'<span class="badge badge-red" style="margin-left:4px">Returned</span>':''}</td>
+      <td>
+        <button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:11px"
+          onclick="openSaleReturnModal(${b.id})">
+          <i class="fa fa-undo-alt"></i> Return
+        </button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function openSaleReturnModal(saleId) {
+  const b = await SalesAPI.get(saleId);
+  _srCurrentBooking = b;
+
+  document.getElementById('sr-modal-invoice-label').textContent = 'Invoice: ' + b.invoice_number + ' — ' + (b.customer_name||'Walk-in');
+  document.getElementById('sr-inv-no').textContent    = b.invoice_number;
+  document.getElementById('sr-inv-cust').textContent  = b.customer_name||'Walk-in';
+  document.getElementById('sr-inv-date').textContent  = (b.created_at||'').replace('T',' ').slice(0,16);
+  document.getElementById('sr-inv-total').textContent = 'Rs.' + Number(b.total_amount).toFixed(2);
+  document.getElementById('sr-reason').value          = 'Defective Product';
+  document.getElementById('sr-notes').value           = '';
+  document.getElementById('sr-refund-total').textContent     = 'Rs.0.00';
+  document.getElementById('sr-return-items-count').textContent = '0 items selected';
+
+  // Build item rows — quantity_pending = quantity - quantity_returned (already-returned items are excluded)
+  const tbody = document.getElementById('sr-items-tbody');
+  tbody.innerHTML = (b.items||[]).map((it,i) => {
+    const pending = it.quantity - (it.quantity_returned||0);
+    const unitPrice = Number(it.unit_price);
+    return `<tr>
+      <td style="padding:6px 10px;text-align:center">
+        <input type="checkbox" class="sr-item-check" data-idx="${i}" data-sale-item-id="${it.id}" onchange="srCalcRefund()" ${pending<=0?'disabled':''}>
+      </td>
+      <td style="padding:6px 10px;font-weight:600">📦 ${it.product_name}${pending<=0?' <span class="badge badge-red" style="font-size:9px">Fully Returned</span>':''}</td>
+      <td style="padding:6px 10px;text-align:center;color:var(--cyan);font-weight:700">${pending}</td>
+      <td style="padding:6px 10px">
+        <input type="number" class="form-input sr-return-qty" data-idx="${i}" data-max="${pending}" data-price="${unitPrice}"
+          value="0" min="0" max="${pending}" style="width:70px;padding:5px 8px;font-size:12px" ${pending<=0?'disabled':''}
+          oninput="srValidateQty(this);srCalcRefund()">
+      </td>
+      <td style="padding:6px 10px;text-align:right;color:var(--text-secondary);font-family:var(--mono)">Rs.${unitPrice.toFixed(2)}</td>
+      <td style="padding:6px 10px;text-align:right;font-weight:700;color:var(--red);font-family:var(--mono)" id="sr-item-refund-${i}">Rs.0.00</td>
+    </tr>`;
+  }).join('');
+
+  openModal('sr-process-modal');
+}
+
+function srToggleAll(checked) {
+  document.querySelectorAll('.sr-item-check').forEach(cb => {
+    cb.checked = checked;
+    const i = cb.dataset.idx;
+    const qtyEl = document.querySelector(`.sr-return-qty[data-idx="${i}"]`);
+    if (qtyEl) qtyEl.value = checked ? qtyEl.dataset.max : 0;
+  });
+  srCalcRefund();
+}
+
+function srValidateQty(el) {
+  const max = parseInt(el.dataset.max)||0;
+  let val = parseInt(el.value)||0;
+  if (val < 0) val = 0;
+  if (val > max) val = max;
+  el.value = val;
+  // Auto-check the checkbox if qty > 0
+  const i = el.dataset.idx;
+  const cb = document.querySelector(`.sr-item-check[data-idx="${i}"]`);
+  if (cb) cb.checked = val > 0;
+}
+
+function srCalcRefund() {
+  let totalRefund = 0;
+  let itemsSelected = 0;
+  document.querySelectorAll('.sr-return-qty').forEach(el => {
+    const i = el.dataset.idx;
+    const qty = parseInt(el.value)||0;
+    const price = parseFloat(el.dataset.price)||0;
+    const refund = qty * price;
+    const refundEl = document.getElementById('sr-item-refund-'+i);
+    if (refundEl) refundEl.textContent = 'Rs.' + refund.toFixed(2);
+    if (qty > 0) { totalRefund += refund; itemsSelected++; }
+  });
+  document.getElementById('sr-refund-total').textContent = 'Rs.' + totalRefund.toFixed(2);
+  document.getElementById('sr-return-items-count').textContent = itemsSelected + ' item' + (itemsSelected!==1?'s':'') + ' selected';
+}
+
+let _srHistoryCache = [];
+
+async function saveSaleReturn() {
+  if (!_srCurrentBooking) return;
+  const returnItems = [];
+  document.querySelectorAll('.sr-return-qty').forEach((el) => {
+    const qty = parseInt(el.value)||0;
+    if (qty > 0) {
+      const saleItemId = parseInt(el.closest('tr').querySelector('.sr-item-check').dataset.saleItemId);
+      returnItems.push({ sale_item: saleItemId, quantity: qty });
+    }
+  });
+  if (!returnItems.length) { toast('Select at least one item to return!','error'); return; }
+  const reason = document.getElementById('sr-reason').value;
+  const notes  = document.getElementById('sr-notes').value;
+
+  try {
+    const saleReturn = await SalesAPI.processReturn(_srCurrentBooking.id, {
+      items: returnItems, reason: notes ? `${reason} — ${notes}` : reason,
+    });
+    // The return is saved as of this point — everything below is just
+    // refreshing what's on screen. A glitch in either refresh call must
+    // never again be allowed to look like the return itself didn't save.
+    closeModal('sr-process-modal');
+    toast(`Return processed — Refund: Rs.${Number(saleReturn.refund_amount).toFixed(2)}`, 'success');
+    try { await renderSaleReturnHistory(); } catch (e) { console.error('Failed to refresh return history list', e); }
+    try { await searchSaleReturnInvoice(); } catch (e) { console.error('Failed to refresh invoice search results', e); }
+  } catch (err) {
+    toast(err.message || 'Failed to process return', 'error');
+  }
+}
+
+async function renderSaleReturnHistory() {
+  const tbody = document.getElementById('sr-history-tbody');
+  const label = document.getElementById('sr-history-count');
+  if (!tbody) return;
+  const data = await SalesAPI.returnHistory({ ordering: '-created_at' });
+  const returns = data.results || data;
+  _srHistoryCache = returns;
+  if (label) label.textContent = returns.length + ' return' + (returns.length!==1?'s':'');
+  if (!returns.length) {
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:28px;color:var(--text-muted)">No returns processed yet</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = returns.map(r => `<tr>
+    <td class="td-mono" style="font-weight:700;color:var(--red)">SR-${String(r.id).padStart(4,'0')}</td>
+    <td style="font-size:12px">${(r.created_at||'').slice(0,10)}</td>
+    <td class="td-mono">${r.sale}</td>
+    <td style="font-weight:600">—</td>
+    <td style="text-align:center">${r.items.length} item(s)</td>
+    <td class="td-mono fw-700" style="color:var(--red)">Rs.${Number(r.refund_amount).toFixed(2)}</td>
+    <td style="font-size:11px">${r.reason||'—'}</td>
+    <td style="font-size:11px;color:var(--text-muted)">${r.processed_by||'—'}</td>
+  </tr>`).join('');
+}
+
+function clearSrFilters() {
+  ['sr-invoice-search','sr-cust-search','sr-date-from','sr-date-to'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.value='';
+  });
+  syncDtDisplay('sr-date-from'); syncDtDisplay('sr-date-to');
+  searchSaleReturnInvoice();
+}
+
+function printSaleReturnReport() {
+  const returns = _srHistoryCache||[];
+  const totalVal = returns.reduce((s,r)=>s+Number(r.refund_amount),0);
+  const html = `<div class="a4-doc"><div style="display:flex;justify-content:space-between;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:12px">
+    <div><div style="font-size:20px;font-weight:900">🏪 SmartRetail ERP</div><div style="font-size:12px;color:#555">Sale Return Report — ${new Date().toLocaleDateString()}</div></div>
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:12px">
+    <thead><tr>${['Return ID','Date','Invoice','Items','Refund','Reason'].map(h=>`<th style="padding:7px;background:#d9d9d9 !important;color:#000 !important;text-align:left">${h}</th>`).join('')}</tr></thead>
+    <tbody>${returns.map((r,i)=>`<tr style="background:${i%2?'#f8f8f8':'#fff'}">
+      <td style="padding:6px 8px;font-weight:700;color:#dc2626">SR-${String(r.id).padStart(4,'0')}</td>
+      <td style="padding:6px 8px">${(r.created_at||'').slice(0,10)}</td>
+      <td style="padding:6px 8px;font-family:monospace">${r.sale}</td>
+      <td style="padding:6px 8px">${r.items.length}</td>
+      <td style="padding:6px 8px;font-weight:800;color:#dc2626">Rs.${Number(r.refund_amount).toFixed(2)}</td>
+      <td style="padding:6px 8px">${r.reason||''}</td>
+    </tr>`).join('')}</tbody>
+    <tfoot><tr style="background:#d9d9d9 !important;color:#000 !important"><td colspan="4" style="padding:8px;font-weight:700">TOTAL REFUNDS</td><td colspan="2" style="padding:8px;font-weight:900;font-size:14px">Rs.${totalVal.toFixed(2)}</td></tr></tfoot>
+  </table></div>`;
+  const pa=document.getElementById('print-area'); pa.innerHTML=html; pa.style.display='block';
+  window.print(); setTimeout(()=>{pa.style.display='none';},1200);
+}
+
+async function exportSaleReturns() {
+  await ReportsAPI.download('sales', 'csv', {}); // full sales report export covers returned invoices too
+  toast('Exported!','success');
+}
+
+// ═══════════════════════════════════════════════════════
+// PURCHASE RETURN MODULE
+// ═══════════════════════════════════════════════════════
+
+let _prSelectedPo = null;
+
+async function openPurchaseReturnModal(poId) {
+  const supSel = document.getElementById('pr-supplier');
+  if (supSel) {
+    const supData = await SuppliersAPI.list({ page_size: 500 });
+    const suppliers = supData.results || supData;
+    supSel.innerHTML = '<option value="">— Select Supplier —</option>' +
+      suppliers.map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+  }
+  document.getElementById('pr-date').value   = new Date().toISOString().split('T')[0];
+  document.getElementById('pr-notes').value  = '';
+  document.getElementById('pr-po-select').innerHTML = '<option value="">— Select PO —</option>';
+  _prSelectedPo = null;
+  document.getElementById('pr-items-list').innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:12px">Select a supplier, then a purchase order, to see its received items.</div>';
+
+  if (poId) {
+    const po = await PurchaseAPI.get(poId);
+    if (supSel) supSel.value = po.supplier;
+    await prLoadPurchases();
+    document.getElementById('pr-po-select').value = poId;
+    await prLoadPoItems();
+  }
+  openModal('pr-modal');
+}
+
+async function prLoadPurchases() {
+  const supId = parseInt(document.getElementById('pr-supplier').value)||0;
+  const poSel = document.getElementById('pr-po-select');
+  const data = await PurchaseAPI.list(supId ? { supplier: supId } : {});
+  const pos = (data.results || data).filter(p => ['received','partially_received'].includes(p.status));
+  poSel.innerHTML = '<option value="">— Select PO —</option>' +
+    pos.map(p=>`<option value="${p.id}">${p.po_number} — ${(p.created_at||'').slice(0,10)} (Rs.${Number(p.total_amount).toFixed(2)})</option>`).join('');
+}
+
+async function prLoadPoItems() {
+  const poId = parseInt(document.getElementById('pr-po-select').value)||0;
+  const el = document.getElementById('pr-items-list');
+  if (!poId) { el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:12px">Select a PO to see its received items.</div>'; return; }
+  const po = await PurchaseAPI.get(poId);
+  _prSelectedPo = po;
+
+  const receivedItems = po.items.filter(i => i.quantity_received > 0);
+  if (!receivedItems.length) {
+    el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:12px">This PO has no received quantity yet — nothing to return.</div>';
+    return;
+  }
+  el.innerHTML = receivedItems.map((item) => `
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <input type="checkbox" class="pr-item-check" data-po-item-id="${item.id}" onchange="prCalcTotal()">
+      <div style="flex:2;min-width:160px;font-weight:600">📦 ${item.product_name}
+        <div style="font-size:10px;color:var(--text-muted)">Received: ${item.quantity_received} @ Rs.${Number(item.unit_cost).toFixed(2)}</div>
+      </div>
+      <div class="form-group-inline" style="margin-bottom:0;width:90px">
+        <label>Return Qty</label>
+        <input class="form-input pr-return-qty" type="number" value="0" min="0" max="${item.quantity_received}"
+          data-po-item-id="${item.id}" data-price="${item.unit_cost}" style="padding:9px 12px"
+          oninput="prCalcTotal()">
+      </div>
+      <div class="form-group-inline" style="margin-bottom:0;width:100px">
+        <label>Line Total</label>
+        <div class="pr-line-total" data-po-item-id="${item.id}" style="padding:9px 12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;font-weight:700;font-family:var(--mono);font-size:12px;color:var(--yellow)">Rs.0.00</div>
+      </div>
+    </div>`).join('');
+  prCalcTotal();
+}
+
+function prCalcTotal() {
+  let total = 0;
+  document.querySelectorAll('.pr-return-qty').forEach(el => {
+    const qty = parseInt(el.value)||0;
+    const price = parseFloat(el.dataset.price)||0;
+    const lineTotal = qty * price;
+    const totalEl = document.querySelector(`.pr-line-total[data-po-item-id="${el.dataset.poItemId}"]`);
+    if (totalEl) totalEl.textContent = 'Rs.'+lineTotal.toFixed(2);
+    total += lineTotal;
+  });
+  const tv = document.getElementById('pr-total-val');
+  if (tv) tv.textContent = 'Rs.'+total.toFixed(2);
+}
+
+async function savePurchaseReturn() {
+  if (!_prSelectedPo) { toast('Please select a purchase order!','error'); return; }
+  const returnItems = [];
+  document.querySelectorAll('.pr-return-qty').forEach(el => {
+    const qty = parseInt(el.value)||0;
+    if (qty > 0) returnItems.push({ purchase_order_item: parseInt(el.dataset.poItemId), quantity: qty });
+  });
+  if (!returnItems.length) { toast('Enter a return quantity for at least one item!','error'); return; }
+  const reason = document.getElementById('pr-reason').value;
+  const notes  = document.getElementById('pr-notes').value;
+
+  try {
+    const result = await PurchaseAPI.processReturn(_prSelectedPo.id, {
+      items: returnItems, reason: notes ? `${reason} — ${notes}` : reason,
+    });
+    // The return is saved as of this point — the list refresh below is just
+    // updating what's on screen, and must never mask a successful save.
+    closeModal('pr-modal');
+    toast(`Purchase Return saved — Rs.${Number(result.refund_amount).toFixed(2)} credited from ${result.supplier_name}`, 'success');
+    try { await renderPurchaseReturns(); } catch (e) { console.error('Failed to refresh purchase return list', e); }
+  } catch (err) {
+    toast(err.message || 'Failed to process return', 'error');
+  }
+}
+
+let _prHistoryCache = [];
+
+async function renderPurchaseReturns() {
+  const q      = (document.getElementById('pr-search')?.value||'').toLowerCase();
+  const fromD  = document.getElementById('pr-date-from')?.value||'';
+  const toD    = document.getElementById('pr-date-to')?.value||'';
+  const tbody  = document.getElementById('pr-tbody');
+  const label  = document.getElementById('pr-count-label');
+  if (!tbody) return;
+
+  const data = await PurchaseAPI.returnHistory({ ordering: '-created_at' });
+  const allRet = data.results || data;
+  _prHistoryCache = allRet;
+
+  let rows = allRet.filter(r=>{
+    const dateOnly = (r.created_at||'').slice(0,10);
+    if (fromD && dateOnly < fromD) return false;
+    if (toD   && dateOnly > toD)   return false;
+    if (q && !(r.po_number||'').toLowerCase().includes(q) &&
+             !(r.supplier_name||'').toLowerCase().includes(q)) return false;
+    return true;
+  });
+
+  document.getElementById('pr-total-returns').textContent = allRet.length;
+  document.getElementById('pr-total-items').textContent   = allRet.reduce((s,r)=>s+r.items.reduce((a,i)=>a+i.quantity,0),0);
+  document.getElementById('pr-total-value').textContent   = 'Rs.'+(allRet.reduce((s,r)=>s+Number(r.refund_amount),0)).toFixed(0);
+  document.getElementById('pr-suppliers-count').textContent = new Set(allRet.map(r=>r.supplier_name)).size;
+
+  if (label) label.textContent = rows.length + ' record' + (rows.length!==1?'s':'');
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:32px;color:var(--text-muted)">
+      <i class="fa fa-truck-loading" style="font-size:28px;display:block;margin-bottom:8px;opacity:.3"></i>
+      No purchase returns recorded yet
+    </td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(r=>`<tr>
+    <td class="td-mono fw-700" style="color:var(--yellow)">PR-${String(r.id).padStart(4,'0')}</td>
+    <td style="font-size:12px">${(r.created_at||'').slice(0,10)}</td>
+    <td class="td-mono">${r.po_number}</td>
+    <td style="font-weight:600">${r.supplier_name}</td>
+    <td style="font-size:11px">${r.items.length} item(s)</td>
+    <td style="text-align:center;font-weight:700">${r.items.reduce((s,i)=>s+i.quantity,0)}</td>
+    <td class="td-mono fw-700" style="color:var(--yellow)">Rs.${Number(r.refund_amount).toFixed(2)}</td>
+    <td style="font-size:11px">${r.reason||'—'}</td>
+    <td><span class="badge badge-yellow">${r.status}</span></td>
+    <td>
+      <button class="btn btn-ghost btn-xs" onclick="printPurchaseReturnSlip(${r.id})" title="Print"><i class="fa fa-print"></i></button>
+    </td>
+  </tr>`).join('');
+}
+
+function clearPrFilters() {
+  ['pr-search','pr-date-from','pr-date-to'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+  renderPurchaseReturns();
+}
+
+function printPurchaseReturnSlip(id) {
+  const r = (_prHistoryCache||[]).find(x=>x.id===id);
+  if (!r) return;
+  const dateStr = (r.created_at||'').slice(0,10);
+  const html=`<div class="a4-doc"><div style="border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:12px">
+    <div style="font-size:20px;font-weight:900">🏪 SmartRetail ERP</div>
+    <div style="font-size:14px;font-weight:700">Purchase Return — PR-${String(r.id).padStart(4,'0')}</div>
+    <div style="font-size:11px;color:#555">Date: ${dateStr} | Supplier: ${r.supplier_name} | PO: ${r.po_number}</div>
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px">
+    <thead><tr>${['Item','Qty','Refund'].map(h=>`<th style="padding:7px;background:#d9d9d9 !important;color:#000 !important;text-align:left">${h}</th>`).join('')}</tr></thead>
+    <tbody>${r.items.map((it,i)=>`<tr style="background:${i%2?'#f8f8f8':'#fff'}">
+      <td style="padding:6px 8px;font-weight:700">Item #${it.purchase_order_item}</td>
+      <td style="padding:6px 8px;text-align:center">${it.quantity}</td>
+      <td style="padding:6px 8px;font-weight:800">Rs.${Number(it.refund_amount).toFixed(2)}</td>
+    </tr>`).join('')}</tbody>
+    <tfoot><tr style="background:#d9d9d9 !important;color:#000 !important"><td colspan="2" style="padding:8px;font-weight:700">TOTAL RETURN VALUE</td><td style="padding:8px;font-weight:900;font-size:14px">Rs.${Number(r.refund_amount).toFixed(2)}</td></tr></tfoot>
+  </table>
+  <div style="font-size:12px;color:#555">Reason: ${r.reason||'—'}</div>
+  <div style="font-size:11px;color:#888;margin-top:8px">Processed on ${dateStr}</div></div>`;
+  const pa=document.getElementById('print-area'); pa.innerHTML=html; pa.style.display='block';
+  window.print(); setTimeout(()=>{pa.style.display='none';},1200);
+}
+
+function printPurchaseReturnReport() {
+  const rows = _prHistoryCache||[];
+  const total = rows.reduce((s,r)=>s+Number(r.refund_amount),0);
+  const html=`<div class="a4-doc"><div style="border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:12px">
+    <div style="font-size:20px;font-weight:900">🏪 SmartRetail ERP</div>
+    <div style="font-size:12px;color:#555">Purchase Return Report — ${new Date().toLocaleDateString()}</div>
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:12px">
+    <thead><tr>${['Return ID','Date','PO Ref','Supplier','Items','Total','Reason'].map(h=>`<th style="padding:7px;background:#d9d9d9 !important;color:#000 !important;text-align:left">${h}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map((r,i)=>`<tr style="background:${i%2?'#f8f8f8':'#fff'}">
+      <td style="padding:6px 8px;font-weight:700;color:#d97706">PR-${String(r.id).padStart(4,'0')}</td>
+      <td style="padding:6px 8px">${(r.created_at||'').slice(0,10)}</td>
+      <td style="padding:6px 8px;font-family:monospace">${r.po_number}</td>
+      <td style="padding:6px 8px;font-weight:700">${r.supplier_name}</td>
+      <td style="padding:6px 8px">${r.items.length}</td>
+      <td style="padding:6px 8px;font-weight:800;color:#d97706">Rs.${Number(r.refund_amount).toFixed(2)}</td>
+      <td style="padding:6px 8px">${r.reason||''}</td>
+    </tr>`).join('')}</tbody>
+    <tfoot><tr style="background:#d9d9d9 !important;color:#000 !important"><td colspan="5" style="padding:8px;font-weight:700">TOTAL</td><td colspan="2" style="padding:8px;font-weight:900;font-size:14px">Rs.${total.toFixed(2)}</td></tr></tfoot>
+  </table></div>`;
+  const pa=document.getElementById('print-area'); pa.innerHTML=html; pa.style.display='block';
+  window.print(); setTimeout(()=>{pa.style.display='none';},1200);
+}
+// ── PASSWORD SHOW/HIDE TOGGLE ─────────────────────────
+// Flips an <input type="password"> to type="text" (and back) and swaps the
+// eye / eye-slash icon on the button that triggered it, so users can check
+// what they've typed before submitting.
+function togglePasswordVisibility(inputId, btn) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  const icon = btn.querySelector('i');
+  const showing = input.type === 'password';
+  input.type = showing ? 'text' : 'password';
+  if (icon) {
+    icon.classList.toggle('fa-eye', !showing);
+    icon.classList.toggle('fa-eye-slash', showing);
+  }
+  btn.setAttribute('aria-label', showing ? 'Hide password' : 'Show password');
+}
+
+// ═══════════════════════════════════════════════════════
+// THEMED SELECT
+// The browser/OS draws a native <select>'s popup itself (that's the default
+// blue highlight bar) and CSS can't touch it. This swaps every <select> for a
+// custom dropdown styled with the app theme. The real <select> stays in the
+// DOM (hidden), so all existing code — .value reads/writes, onchange="",
+// options rebuilt with innerHTML — keeps working exactly as before.
+// Opt a select out with the data-native attribute.
+// ═══════════════════════════════════════════════════════
+(function initThemedSelects() {
+  const vDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+  const iDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex');
+  const LAYOUT_RE = /^(width|min-width|max-width|flex(-|$)|margin(-|$)|grid-column|align-self|justify-self)/;
+  let current = null; // the one open dropdown: { select, close }
+
+  function enhance(select) {
+    if (select._cs || select.multiple || select.size > 1 || select.hasAttribute('data-native')) return;
+    select._cs = true;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'cs-wrap';
+    const trig = document.createElement('button');
+    trig.type = 'button';
+    trig.className = (select.className + ' cs-trigger').trim();
+    trig.setAttribute('aria-haspopup', 'listbox');
+    trig.innerHTML = '<span class="cs-label"></span><i class="fa fa-chevron-down cs-caret"></i>';
+    const label = trig.firstChild;
+
+    // Inline layout styles (width/flex/margin) go on the wrapper so the
+    // dropdown sits in the page exactly where the select did; the rest
+    // (padding, font-size, colours…) go on the trigger so it looks the same.
+    for (let i = 0; i < select.style.length; i++) {
+      const p = select.style[i];
+      if (p === 'display') continue;
+      const v = select.style.getPropertyValue(p), pr = select.style.getPropertyPriority(p);
+      (LAYOUT_RE.test(p) ? wrap : trig).style.setProperty(p, v, pr);
+    }
+
+    select.parentNode.insertBefore(wrap, select);
+    wrap.appendChild(trig);
+    wrap.appendChild(select);
+    select.classList.add('cs-native');
+    select.tabIndex = -1;
+    select.setAttribute('aria-hidden', 'true');
+    select.focus = () => trig.focus();
+
+    function sync() {
+      const opt = select.options[select.selectedIndex];
+      label.textContent = opt ? opt.text : '';
+      label.classList.toggle('cs-placeholder', !opt || (opt.disabled && opt.value === ''));
+      trig.disabled = select.disabled;
+      wrap.style.display = (select.style.display === 'none' || select.hidden) ? 'none' : '';
+    }
+
+    // Programmatic `select.value = x` / `select.selectedIndex = n` fire no
+    // event, so intercept the setters on this instance to keep the label right.
+    Object.defineProperty(select, 'value', {
+      configurable: true,
+      get() { return vDesc.get.call(this); },
+      set(v) { vDesc.set.call(this, v); sync(); }
+    });
+    Object.defineProperty(select, 'selectedIndex', {
+      configurable: true,
+      get() { return iDesc.get.call(this); },
+      set(v) { iDesc.set.call(this, v); sync(); }
+    });
+    select.addEventListener('change', sync);
+    new MutationObserver(() => {
+      sync();
+      if (current && current.select === select) current.close();
+    }).observe(select, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['disabled', 'style', 'hidden'] });
+    sync();
+
+    // ── dropdown panel ──
+    function open() {
+      if (select.disabled) return;
+      if (current) current.close();
+      sync();
+
+      const panel = document.createElement('div');
+      panel.className = 'cs-panel';
+      panel.setAttribute('role', 'listbox');
+      const list = document.createElement('div');
+      list.className = 'cs-list';
+      const items = [], groups = [];
+      let activeItem = null;
+
+      function addOption(o, group) {
+        const isSel = o.index === select.selectedIndex;
+        const el = document.createElement('div');
+        el.className = 'cs-opt' + (o.disabled ? ' disabled' : '') + (isSel ? ' selected' : '');
+        el.setAttribute('role', 'option');
+        el.innerHTML = '<span></span>' + (isSel ? '<i class="fa fa-check cs-check"></i>' : '');
+        el.firstChild.textContent = o.text;
+        const item = { el, option: o, text: o.text.toLowerCase(), visible: true, group };
+        el.addEventListener('mousedown', e => e.preventDefault());
+        el.addEventListener('mousemove', () => { if (!o.disabled) setActive(item); });
+        el.addEventListener('click', () => { if (!o.disabled) choose(o); });
+        list.appendChild(el);
+        items.push(item);
+        if (group) group.items.push(item);
+        return item;
+      }
+      Array.from(select.children).forEach(ch => {
+        if (ch.tagName === 'OPTGROUP') {
+          const gl = document.createElement('div');
+          gl.className = 'cs-group';
+          gl.textContent = ch.label;
+          list.appendChild(gl);
+          const g = { labelEl: gl, items: [] };
+          groups.push(g);
+          Array.from(ch.children).forEach(o => addOption(o, g));
+        } else if (ch.tagName === 'OPTION') {
+          addOption(ch, null);
+        }
+      });
+      if (!items.length) {
+        list.innerHTML = '<div class="cs-empty">No options</div>';
+      }
+
+      let search = null;
+      if (items.length > 8) {
+        search = document.createElement('input');
+        search.type = 'text';
+        search.className = 'cs-search';
+        search.placeholder = 'Search…';
+        search.autocomplete = 'off';
+        panel.appendChild(search);
+        search.addEventListener('input', () => {
+          const q = search.value.trim().toLowerCase();
+          items.forEach(it => { it.visible = !q || it.text.includes(q); it.el.style.display = it.visible ? '' : 'none'; });
+          groups.forEach(g => { g.labelEl.style.display = g.items.some(i => i.visible) ? '' : 'none'; });
+          const first = items.find(i => i.visible && !i.option.disabled);
+          setActive(first || null);
+        });
+      }
+      panel.appendChild(list);
+
+      function setActive(item) {
+        if (activeItem) activeItem.el.classList.remove('active');
+        activeItem = item;
+        if (item) { item.el.classList.add('active'); item.el.scrollIntoView({ block: 'nearest' }); }
+      }
+      function move(dir) {
+        const nav = items.filter(i => i.visible && !i.option.disabled);
+        if (!nav.length) return;
+        let idx = nav.indexOf(activeItem);
+        idx = idx === -1 ? (dir > 0 ? 0 : nav.length - 1) : (idx + dir + nav.length) % nav.length;
+        setActive(nav[idx]);
+      }
+      function choose(o) {
+        const changed = select.selectedIndex !== o.index;
+        iDesc.set.call(select, o.index);
+        sync();
+        close();
+        trig.focus();
+        if (changed) {
+          select.dispatchEvent(new Event('input', { bubbles: true }));
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
+
+      function onKey(e) {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); trig.focus(); }
+        else if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
+        else if (e.key === 'Enter' || (e.key === ' ' && !search)) { e.preventDefault(); if (activeItem) choose(activeItem.option); }
+        else if (e.key === 'Tab') close();
+      }
+      function onDocDown(e) { if (!panel.contains(e.target) && !trig.contains(e.target)) close(); }
+      let ready = false;
+      function onScroll(e) { if (ready && !panel.contains(e.target)) close(); }
+      function onResize() { close(); }
+
+      function close() {
+        if (!panel.isConnected && current !== api) return;
+        panel.remove();
+        trig.classList.remove('open');
+        document.removeEventListener('mousedown', onDocDown, true);
+        document.removeEventListener('scroll', onScroll, true);
+        window.removeEventListener('resize', onResize);
+        trig.removeEventListener('keydown', onKey);
+        if (current === api) current = null;
+      }
+      const api = { select, close };
+      current = api;
+
+      document.body.appendChild(panel);
+      trig.classList.add('open');
+
+      // Position under the trigger (or above if there's more room there).
+      const r = trig.getBoundingClientRect();
+      panel.style.minWidth = r.width + 'px';
+      panel.style.maxWidth = Math.max(r.width, 360) + 'px';
+      const searchH = search ? 44 : 0;
+      const wanted = Math.min(list.scrollHeight + searchH + 14, 300);
+      const below = window.innerHeight - r.bottom - 12;
+      const above = r.top - 12;
+      const goUp = below < Math.min(wanted, 200) && above > below;
+      const room = Math.max(120, goUp ? above : below);
+      list.style.maxHeight = Math.max(80, Math.min(300, room) - searchH - 14) + 'px';
+      const pw = panel.offsetWidth;
+      panel.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8)) + 'px';
+      if (goUp) { panel.classList.add('cs-up'); panel.style.bottom = (window.innerHeight - r.top + 6) + 'px'; }
+      else      { panel.style.top = (r.bottom + 6) + 'px'; }
+
+      const selItem = items.find(i => i.option.index === select.selectedIndex && !i.option.disabled);
+      setActive(selItem || items.find(i => !i.option.disabled) || null);
+      if (selItem) selItem.el.scrollIntoView({ block: 'center' });
+
+      document.addEventListener('mousedown', onDocDown, true);
+      document.addEventListener('scroll', onScroll, true);
+      window.addEventListener('resize', onResize);
+      trig.addEventListener('keydown', onKey);
+      if (search) { search.addEventListener('keydown', onKey); search.focus(); }
+      requestAnimationFrame(() => { ready = true; });
+    }
+
+    trig.addEventListener('click', () => {
+      if (current && current.select === select) current.close(); else open();
+    });
+    trig.addEventListener('keydown', e => {
+      if (current && current.select === select) return; // handled by the open panel
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault(); open();
+      }
+    });
+  }
+
+  function scan(root) {
+    if (root.tagName === 'SELECT') enhance(root);
+    if (root.querySelectorAll) root.querySelectorAll('select').forEach(enhance);
+  }
+  function start() {
+    scan(document);
+    // Selects created later (modals/tables built with innerHTML) get enhanced too.
+    new MutationObserver(muts => {
+      for (const m of muts) for (const n of m.addedNodes) if (n.nodeType === 1) scan(n);
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();
+
+// Live hint under "New Password" on the reset screen.
+document.addEventListener('DOMContentLoaded', () => {
+  const p1 = document.getElementById('rp-pass1');
+  const p2 = document.getElementById('rp-pass2');
+  const hint = document.getElementById('rp-hint');
+  if (!p1 || !hint) return;
+  const BASE = 'At least 8 characters. Avoid common passwords and all-digit passwords.';
+  function update() {
+    const v = p1.value;
+    hint.classList.remove('is-bad', 'is-good');
+    if (!v) { hint.textContent = BASE; return; }
+    if (v.length < 8) { hint.textContent = `Too short — ${8 - v.length} more character${8 - v.length === 1 ? '' : 's'} needed.`; hint.classList.add('is-bad'); return; }
+    if (/^\d+$/.test(v)) { hint.textContent = 'Passwords made only of digits are not allowed.'; hint.classList.add('is-bad'); return; }
+    if (p2 && p2.value && p2.value !== v) { hint.textContent = 'The two passwords do not match yet.'; hint.classList.add('is-bad'); return; }
+    hint.textContent = p2 && p2.value ? 'Looks good.' : 'Good length — now confirm it below.';
+    hint.classList.add('is-good');
+  }
+  p1.addEventListener('input', update);
+  if (p2) p2.addEventListener('input', update);
+});
