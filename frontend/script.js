@@ -6168,14 +6168,20 @@ function buildSlipA4Html(rawSale, zoomMultiplier) {
   const storeEmail = s.email || '';
   const distName = s.distributor_name || '';
   const distAddress = s.distributor_address || '';
-  const distPhone = [s.distributor_phone, s.distributor_email].filter(Boolean).join(' · ');
+  const distPhone = s.distributor_phone || '';
+  const distEmail = s.distributor_email || '';
   const ntn = s.tax_id || '';
   const logoDataUrl = s.logo || '';
   const footerNote = s.invoice_footer_note || '';
 
+  // Logo size (Settings → Invoice Branding → Logo Size). 1 = old 60x50 box.
+  const logoScale = Number(ssSettings.logoScale) || 1;
+  const logoBoxW = Math.round(60 * logoScale), logoBoxH = Math.round(50 * logoScale);
+  const logoImgW = Math.round(56 * logoScale), logoImgH = Math.round(46 * logoScale);
+
   const logoBlock = logoDataUrl
-    ? `<img src="${logoDataUrl}" style="max-width:56px;max-height:46px;object-fit:contain">`
-    : `<span style="font-size:28px;line-height:1">🏪</span>`;
+    ? `<img src="${logoDataUrl}" style="max-width:${logoImgW}px;max-height:${logoImgH}px;object-fit:contain">`
+    : `<span style="font-size:${Math.round(28 * logoScale)}px;line-height:1">🏪</span>`;
 
   // `zoom` (not standard CSS but supported by every Chromium-based
   // browser, which is what this app's print flow runs in) scales the
@@ -6198,15 +6204,18 @@ function buildSlipA4Html(rawSale, zoomMultiplier) {
   return `<div class="a4-doc" style="page-break-before:always;margin:0;padding:10mm 12mm;box-sizing:border-box;font-size:11px;zoom:${fontScale};--slip-zoom:${fontScale};display:flex !important;flex-direction:column;min-height:calc((100vh - 1mm) / ${fontScale})">
     <!-- ═══ MAIN HEADER ═══ -->
     <div style="display:flex;align-items:flex-start;gap:10px;border-bottom:2px solid #000;padding-bottom:4mm;margin-bottom:3mm">
-      ${ssSettings.showCompanyLogo ? `<div style="width:60px;height:50px;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+      ${ssSettings.showCompanyLogo ? `<div style="width:${logoBoxW}px;height:${logoBoxH}px;display:flex;align-items:center;justify-content:center;flex-shrink:0">
         ${logoBlock}
       </div>` : ''}
       <div>
         <div style="font-size:15px;font-weight:900;color:#000;letter-spacing:-0.3px;line-height:1.1;margin-bottom:4px">${storeName}</div>
         <div style="font-size:9px;color:#000;line-height:1.7">
           ${distName    ? `<div><span style="color:#555">Distributor Name:</span> <strong>${distName}</strong></div>` : ''}
-          ${(storePhone||distPhone) ? `<div><span style="color:#555">Phone No:</span> <strong>${storePhone||distPhone}</strong></div>` : ''}
-          ${(storeAddress||distAddress) ? `<div><span style="color:#555">Address:</span> <strong>${storeAddress||distAddress}</strong></div>` : ''}
+          ${distPhone   ? `<div><span style="color:#555">Distributor Phone:</span> <strong>${distPhone}</strong></div>` : ''}
+          ${distAddress ? `<div><span style="color:#555">Distributor Address:</span> <strong>${distAddress}</strong></div>` : ''}
+          ${distEmail   ? `<div><span style="color:#555">Distributor Email:</span> <strong>${distEmail}</strong></div>` : ''}
+          ${storePhone   ? `<div><span style="color:#555">Phone No:</span> <strong>${storePhone}</strong></div>` : ''}
+          ${storeAddress ? `<div><span style="color:#555">Address:</span> <strong>${storeAddress}</strong></div>` : ''}
           ${ntn ? `<div><span style="color:#555">NTN No:</span> <strong>${ntn}</strong></div>` : ''}
         </div>
       </div>
@@ -6678,6 +6687,49 @@ async function runBackupNow() {
 }
 
 
+// ── Multiple phone numbers (Settings) ───────────────────────────────────
+// Each phone field (store / distributor) is a hidden input (#set-phone,
+// #set-dist-phone) that holds the numbers joined by ", " — that is the one
+// value saveSettings() sends and the invoice prints — plus a list of
+// editable rows (#<id>-list) the user adds/removes numbers in.
+function _phoneSplit(v) {
+  return String(v || '').split(/[,;\n]+/).map(x => x.trim()).filter(Boolean);
+}
+function _phoneAttr(v) {
+  return String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+function phoneListRender(id, nums) {
+  const box = document.getElementById(id + '-list');
+  if (!box) return;
+  const ph = box.dataset.placeholder || '';
+  box.innerHTML = nums.map((n, i) => `<div style="display:flex;gap:6px;margin-bottom:6px">
+      <input class="form-input" style="flex:1" value="${_phoneAttr(n)}" placeholder="${_phoneAttr(ph)}" oninput="phoneListSync('${id}')">
+      <button type="button" class="btn btn-ghost btn-sm" title="Remove" onclick="phoneListRemove('${id}', ${i})" style="color:var(--red)"><i class="fa fa-times"></i></button>
+    </div>`).join('');
+  phoneListSync(id);
+}
+function _phoneRows(id) {
+  return Array.from(document.querySelectorAll('#' + id + '-list input')).map(i => i.value);
+}
+function phoneListSync(id) {
+  const hidden = document.getElementById(id);
+  if (hidden) hidden.value = _phoneRows(id).map(x => x.trim()).filter(Boolean).join(', ');
+  if (typeof updatePreview === 'function') updatePreview();
+}
+function phoneListInit(id, value) {
+  const nums = _phoneSplit(value);
+  phoneListRender(id, nums.length ? nums : ['']);
+}
+function phoneListAdd(id) {
+  phoneListRender(id, _phoneRows(id).concat(['']));
+  const inputs = document.querySelectorAll('#' + id + '-list input');
+  if (inputs.length) inputs[inputs.length - 1].focus();
+}
+function phoneListRemove(id, idx) {
+  const rows = _phoneRows(id).filter((_, i) => i !== idx);
+  phoneListRender(id, rows.length ? rows : ['']);
+}
+
 async function renderSettings() {
   const s = await SettingsAPI.getCompany();
   _companySettingsCache = s;
@@ -6686,7 +6738,7 @@ async function renderSettings() {
 
   setVal('set-storename', s.company_name);
   setVal('set-address', s.address);
-  setVal('set-phone', s.phone);
+  phoneListInit('set-phone', s.phone);
   setVal('set-email', s.email);
   setVal('set-website', s.website);
   setVal('set-taxrate', s.default_tax_percent);
@@ -6699,7 +6751,8 @@ async function renderSettings() {
   setChecked('set-show-qr', s.show_invoice_qr !== false);
   setVal('set-ntn', s.tax_id||'');
   setVal('set-dist-name', s.distributor_name);
-  setVal('set-dist-phone', s.distributor_phone);
+  phoneListInit('set-dist-phone', s.distributor_phone);
+  setVal('set-logo-scale', String(Number(ssSettings.logoScale) || 1));
   setVal('set-dist-address', s.distributor_address);
   setVal('set-dist-email', s.distributor_email);
   _renderGeneralAuthStatus(!!s.general_auth_enabled);
@@ -6762,6 +6815,12 @@ async function saveSettings() {
     distributor_address: g('set-dist-address'),
     distributor_email: g('set-dist-email'),
   };
+  // Logo size on the printed invoice (kept with the other slip print options in ssSettings).
+  const logoScaleEl = document.getElementById('set-logo-scale');
+  if (logoScaleEl) {
+    ssSettings.logoScale = parseFloat(logoScaleEl.value) || 1;
+    localStorage.setItem(SS_SETTINGS_KEY, JSON.stringify(ssSettings));
+  }
   // General Auth: only sent when a new password was typed (blank = keep current).
   const newGeneralAuth = g('set-general-auth');
   if (newGeneralAuth) payload.general_auth_password = newGeneralAuth;
@@ -9924,6 +9983,9 @@ const SS_SETTINGS_DEFAULTS = {
   // the items table — independent of fontScale above, which scales the
   // whole slip (logo, totals, header, everything). 1 = original 9.5px.
   productNameFontScale: 1,
+  // Size of the company logo in the invoice header. 1 = the old size (60x50 box);
+  // now a bit bigger by default. Changed from Settings → Invoice Branding → Logo Size.
+  logoScale: 1.25,
 };
 let ssSettings = (() => {
   try {

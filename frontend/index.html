@@ -1594,7 +1594,11 @@
             <div class="card-body">
               <div class="form-group-inline"><label>Store Name</label><input class="form-input" id="set-storename" value="SmartRetail Store"></div>
               <div class="form-group-inline"><label>Address</label><input class="form-input" id="set-address" value="123 Market Street, City"></div>
-              <div class="form-group-inline"><label>Phone</label><input class="form-input" id="set-phone" value="+1 555-000-1234"></div>
+              <div class="form-group-inline"><label>Phone Numbers</label>
+                <input type="hidden" id="set-phone">
+                <div id="set-phone-list" data-placeholder="e.g. 0300-1234567"></div>
+                <button type="button" class="btn btn-ghost btn-sm" onclick="phoneListAdd('set-phone')"><i class="fa fa-plus"></i> Add another number</button>
+              </div>
               <div class="form-group-inline"><label>Email</label><input class="form-input" id="set-email" value="store@smartretail.com"></div>
               <div class="form-group-inline"><label>Website</label><input class="form-input" id="set-website" placeholder="https://www.yourstore.com"></div>
               <div class="form-group-inline"><label>Currency</label>
@@ -1621,6 +1625,14 @@
                   <div id="set-logo-preview" style="width:60px;height:60px;border:2px dashed var(--border);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:24px;overflow:hidden;flex-shrink:0">🏪</div>
                 </div>
                 <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Logo appears on all A4 invoices & slips. Recommended: 200×60px PNG</div>
+              </div>
+              <div class="form-group-inline"><label>Logo Size on Invoice</label>
+                <select class="form-input" id="set-logo-scale">
+                  <option value="1">Normal (old size)</option>
+                  <option value="1.25">Medium</option>
+                  <option value="1.5">Large</option>
+                  <option value="1.8">Extra Large</option>
+                </select>
               </div>
               <div class="form-group-inline"><label>Invoice Number Prefix</label><input class="form-input" id="set-invoice-prefix" value="INV-" placeholder="e.g. INV-"></div>
               <div class="form-group-inline"><label>Account Number Prefix</label><input class="form-input" id="set-account-prefix" value="ACC-" maxlength="10" placeholder="e.g. BCC-"><div style="font-size:11px;color:var(--text-muted);margin-top:4px">Customer account numbers will look like this prefix + number (e.g. BCC-0001). Set a different prefix for each company.</div></div>
@@ -1654,7 +1666,11 @@
                 <i class="fa fa-info-circle" style="color:var(--accent)"></i> This info prints on every A4 invoice as the distribution party.
               </div>
               <div class="form-group-inline"><label>Distributor / Agency Name</label><input class="form-input" id="set-dist-name" placeholder="e.g. City Distributors Co."></div>
-              <div class="form-group-inline"><label>Distributor Phone</label><input class="form-input" id="set-dist-phone" placeholder="+1 555-000-0000"></div>
+              <div class="form-group-inline"><label>Distributor Phone Numbers</label>
+                <input type="hidden" id="set-dist-phone">
+                <div id="set-dist-phone-list" data-placeholder="e.g. 0300-1234567"></div>
+                <button type="button" class="btn btn-ghost btn-sm" onclick="phoneListAdd('set-dist-phone')"><i class="fa fa-plus"></i> Add another number</button>
+              </div>
               <div class="form-group-inline"><label>Distributor Address</label><input class="form-input" id="set-dist-address" placeholder="Distributor address..."></div>
               <div class="form-group-inline"><label>Distributor Email</label><input class="form-input" id="set-dist-email" placeholder="distributor@email.com"></div>
               <div class="form-group-inline"><label>NTN / Tax Registration No</label><input class="form-input" id="set-ntn" placeholder="NTN-0000000-0"></div>

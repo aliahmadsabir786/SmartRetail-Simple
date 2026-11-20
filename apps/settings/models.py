@@ -9,7 +9,8 @@ class CompanySettings(models.Model):
     company_name = models.CharField(max_length=200, default="My Company")
     logo = models.ImageField(upload_to="company/", null=True, blank=True)
     address = models.TextField(blank=True)
-    phone = models.CharField(max_length=20, blank=True)
+    # Several numbers can be stored, comma-separated (e.g. "0300-1234567, 0321-7654321").
+    phone = models.CharField(max_length=255, blank=True)
     email = models.EmailField(blank=True)
     website = models.URLField(blank=True)
     tax_id = models.CharField(max_length=50, blank=True)
@@ -33,7 +34,8 @@ class CompanySettings(models.Model):
     backup_frequency_days = models.PositiveIntegerField(default=7)
 
     distributor_name = models.CharField(max_length=200, blank=True)
-    distributor_phone = models.CharField(max_length=20, blank=True)
+    distributor_# Several numbers can be stored, comma-separated (e.g. "0300-1234567, 0321-7654321").
+    phone = models.CharField(max_length=255, blank=True)
     distributor_address = models.TextField(blank=True)
     distributor_email = models.EmailField(blank=True)
 
