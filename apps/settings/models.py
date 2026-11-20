@@ -34,8 +34,7 @@ class CompanySettings(models.Model):
     backup_frequency_days = models.PositiveIntegerField(default=7)
 
     distributor_name = models.CharField(max_length=200, blank=True)
-    distributor_# Several numbers can be stored, comma-separated (e.g. "0300-1234567, 0321-7654321").
-    phone = models.CharField(max_length=255, blank=True)
+    distributor_phone = models.CharField(max_length=255, blank=True)  # comma-separated, like phone
     distributor_address = models.TextField(blank=True)
     distributor_email = models.EmailField(blank=True)
 
